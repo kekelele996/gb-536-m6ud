@@ -16,12 +16,13 @@ import (
 type AnnotationSchemaService struct {
 	db         *gorm.DB
 	repository *repository.AnnotationSchemaRepository
+	publishes  *repository.SchemaPublishRepository
 	datasets   *repository.CorpusDatasetRepository
 	system     *SystemService
 }
 
-func NewAnnotationSchemaService(db *gorm.DB, repository *repository.AnnotationSchemaRepository, datasets *repository.CorpusDatasetRepository, system *SystemService) *AnnotationSchemaService {
-	return &AnnotationSchemaService{db: db, repository: repository, datasets: datasets, system: system}
+func NewAnnotationSchemaService(db *gorm.DB, repository *repository.AnnotationSchemaRepository, publishes *repository.SchemaPublishRepository, datasets *repository.CorpusDatasetRepository, system *SystemService) *AnnotationSchemaService {
+	return &AnnotationSchemaService{db: db, repository: repository, publishes: publishes, datasets: datasets, system: system}
 }
 
 func (service *AnnotationSchemaService) Create(request dto.CreateAnnotationSchemaRequest, actor dto.Actor, requestID string) (dto.AnnotationSchemaResponse, error) {
@@ -172,6 +173,102 @@ func (service *AnnotationSchemaService) Transition(id uint, target string, actor
 		return dto.AnnotationSchemaResponse{}, err
 	}
 	return schemaResponse(after), nil
+}
+
+// Publish performs the schema-center-only release. The ledger attempt and the
+// schema transition commit in one schema-domain transaction; no annotation
+// console row is written. An injected failure records a failed attempt and
+// leaves the schema in validated state, so the release can be retried with the
+// already-submitted console result sets untouched.
+func (service *AnnotationSchemaService) Publish(id uint, request dto.PublishSchemaRequest, actor dto.Actor, requestID string) (dto.AnnotationSchemaResponse, error) {
+	before, err := service.repository.Get(id)
+	if err != nil {
+		return dto.AnnotationSchemaResponse{}, MapRepositoryError("annotation schema", err)
+	}
+	if !constants.CanTransitionSchema(before.SchemaState, constants.SchemaPublished) {
+		return dto.AnnotationSchemaResponse{}, Conflict("invalid_schema_transition",
+			"publication is only allowed from the validated state", repository.ErrStateConflict)
+	}
+	failureReason := strings.TrimSpace(request.FailureInjection)
+	if failureReason != "" {
+		// The failed attempt is the schema center's durable record that a release
+		// did not happen. It commits independently of any cross-side transaction so
+		// the operator can retry the schema side while console data stays as-is.
+		if _, recordErr := service.publishes.RecordAttempt(id, actor.ID, constants.PublishFailed, failureReason); recordErr != nil {
+			return dto.AnnotationSchemaResponse{}, Internal("could not record the failed publication attempt", recordErr)
+		}
+		return dto.AnnotationSchemaResponse{}, Conflict("schema_publish_failed", "schema publication failed: "+failureReason, repository.ErrStateConflict)
+	}
+	err = service.db.Transaction(func(tx *gorm.DB) error {
+		publishes := service.publishes.WithDB(tx)
+		if transitionErr := service.repository.WithDB(tx).Transition(id, before.SchemaState, constants.SchemaPublished); transitionErr != nil {
+			return Conflict("state_conflict", "schema state changed concurrently", transitionErr)
+		}
+		if _, recordErr := publishes.RecordAttempt(id, actor.ID, constants.PublishSucceeded, ""); recordErr != nil {
+			return Internal("could not record the successful publication", recordErr)
+		}
+		after, reloadErr := service.repository.WithDB(tx).Get(id)
+		if reloadErr != nil {
+			return Internal("could not reload annotation schema", reloadErr)
+		}
+		return service.system.RecordAuditTx(tx, actor, requestID, "annotation_schema.published", "annotation_schema", auditID(id),
+			nil, schemaSummary(before), schemaSummary(after))
+	})
+	if err != nil {
+		return dto.AnnotationSchemaResponse{}, err
+	}
+	return service.Get(id)
+}
+
+// PublishAttempts returns the schema-center release ledger for one version.
+func (service *AnnotationSchemaService) PublishAttempts(id uint) ([]dto.SchemaPublishAttemptResponse, error) {
+	attempts, err := service.publishes.ListBySchema(id)
+	if err != nil {
+		return nil, Internal("could not list publication attempts", err)
+	}
+	responses := make([]dto.SchemaPublishAttemptResponse, 0, len(attempts))
+	for _, attempt := range attempts {
+		responses = append(responses, dto.SchemaPublishAttemptResponse{
+			ID: attempt.ID, SchemaID: attempt.SchemaID, AttemptNo: attempt.AttemptNo,
+			Status: attempt.Status, FailureReason: attempt.FailureReason, AttemptedBy: attempt.AttemptedBy,
+			PublishedAt: attempt.PublishedAt, CreatedAt: attempt.CreatedAt,
+		})
+	}
+	return responses, nil
+}
+
+// Deprecate retires a published schema version. Console result sets pinned to
+// the version are retained (never deleted) and counted as rework impact; they
+// must be re-annotated against the current published version before scoring.
+func (service *AnnotationSchemaService) Deprecate(id uint, actor dto.Actor, requestID string) (dto.AnnotationSchemaResponse, int64, error) {
+	before, err := service.repository.Get(id)
+	if err != nil {
+		return dto.AnnotationSchemaResponse{}, 0, MapRepositoryError("annotation schema", err)
+	}
+	if !constants.CanTransitionSchema(before.SchemaState, constants.SchemaDeprecated) {
+		return dto.AnnotationSchemaResponse{}, 0, Conflict("invalid_schema_transition",
+			"only a published schema can be deprecated", repository.ErrStateConflict)
+	}
+	impacted, err := service.repository.CountAnnotationsOnSchema(id)
+	if err != nil {
+		return dto.AnnotationSchemaResponse{}, 0, Internal("could not assess deprecation impact", err)
+	}
+	err = service.db.Transaction(func(tx *gorm.DB) error {
+		if transitionErr := service.repository.WithDB(tx).Transition(id, before.SchemaState, constants.SchemaDeprecated); transitionErr != nil {
+			return Conflict("state_conflict", "schema state changed concurrently", transitionErr)
+		}
+		after, reloadErr := service.repository.WithDB(tx).Get(id)
+		if reloadErr != nil {
+			return Internal("could not reload annotation schema", reloadErr)
+		}
+		return service.system.RecordAuditTx(tx, actor, requestID, "annotation_schema.deprecated", "annotation_schema", auditID(id),
+			map[string]any{"impacted_result_sets": impacted, "retained": true}, schemaSummary(before), schemaSummary(after))
+	})
+	if err != nil {
+		return dto.AnnotationSchemaResponse{}, 0, err
+	}
+	response, err := service.Get(id)
+	return response, impacted, err
 }
 
 func validateSchemaDefinitions(definitions []dto.LabelDefinition, examples []dto.MaskedExample) error {

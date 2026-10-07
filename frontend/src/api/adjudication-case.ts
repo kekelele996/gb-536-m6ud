@@ -42,4 +42,12 @@ export class AdjudicationCaseApi {
   reopen(id: number, note: string) {
     return this.api.post<AdjudicationCase>(`/adjudications/${id}/reopen`, { note });
   }
+
+  suspend(id: number, reason: string) {
+    return this.api.post<AdjudicationCase>(`/adjudications/${id}/suspend`, { reason });
+  }
+
+  resume(id: number, note: string) {
+    return this.api.post<AdjudicationCase>(`/adjudications/${id}/resume`, { note });
+  }
 }

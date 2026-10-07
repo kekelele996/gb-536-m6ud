@@ -29,6 +29,13 @@ const (
 	CaseReviewed    = "reviewed"
 	CaseAccepted    = "accepted"
 	CaseReopened    = "reopened"
+	CaseSuspended   = "suspended"
+
+	BindingCurrent    = "current"
+	BindingPinned     = "pinned"
+	BindingUnresolved = "unresolved"
+	PublishSucceeded  = "succeeded"
+	PublishFailed     = "failed"
 )
 
 func ValidRole(value string) bool {
@@ -73,11 +80,18 @@ func CanTransitionAnnotation(from, to string) bool {
 
 func CanTransitionCase(from, to string) bool {
 	allowed := map[string]map[string]bool{
-		CaseOpen:        {CaseAssigned: true},
-		CaseReopened:    {CaseAssigned: true},
-		CaseAssigned:    {CaseAdjudicated: true},
+		CaseOpen:        {CaseAssigned: true, CaseSuspended: true},
+		CaseReopened:    {CaseAssigned: true, CaseSuspended: true},
+		CaseAssigned:    {CaseAdjudicated: true, CaseSuspended: true},
 		CaseAdjudicated: {CaseReviewed: true},
 		CaseReviewed:    {CaseAccepted: true, CaseReopened: true},
+		CaseSuspended:   {CaseOpen: true},
 	}
 	return allowed[from][to]
+}
+
+// CanSuspendCase reports whether an unresolved reconciliation finding may put
+// the case on hold. Decided, reviewed and accepted cases stay on the record.
+func CanSuspendCase(state string) bool {
+	return CanTransitionCase(state, CaseSuspended)
 }

@@ -39,11 +39,16 @@ export interface AdjudicationCase {
   item_key: string;
   annotation_set_ids: number[];
   agreement: AgreementDetails;
+  schema_code: string;
+  schema_version: number;
+  schema_current: boolean;
   disagreement_type: DisagreementType;
   confusion_snapshot: ConfusionCell[];
   evidence_snapshot: DiffEvidence[];
   cluster_key: string;
   case_state: CaseState;
+  suspended_reason: string;
+  suspended_at?: string;
   final_labels: AnnotationLabel[];
   rationale: string;
   adjudicator_id?: number;

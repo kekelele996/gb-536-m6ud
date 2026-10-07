@@ -1,4 +1,4 @@
-import { AnnotationState } from './enums/annotation-state';
+import { AnnotationState, SchemaBindingState } from './enums/annotation-state';
 
 export interface AnnotationLabel {
   unit_key: string;
@@ -14,11 +14,17 @@ export interface AnnotationSet {
   schema_id: number;
   schema_code: string;
   schema_version: number;
+  effective_schema_code: string;
+  effective_schema_version: number;
+  schema_binding_state: SchemaBindingState;
+  schema_current: boolean;
+  pinned_at?: string;
   annotator_id: number;
   annotator: string;
   item_key: string;
   labels: AnnotationLabel[];
   source_checksum: string;
+  submitted_source_checksum: string;
   annotation_state: AnnotationState;
   submitted_at?: string;
   supersedes_id?: number;

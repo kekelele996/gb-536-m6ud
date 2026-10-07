@@ -2,6 +2,7 @@ import { inject, Injectable } from '@angular/core';
 import { ApiClient } from './api-client';
 import { AnnotationSchema, CreateAnnotationSchema, UpdateAnnotationSchema } from '../types/annotation-schema';
 import { SchemaState } from '../types/enums/annotation-state';
+import { SchemaPublishAttempt } from '../types/schema-publish';
 
 @Injectable({ providedIn: 'root' })
 export class AnnotationSchemaApi {
@@ -29,5 +30,22 @@ export class AnnotationSchemaApi {
 
   transition(id: number, targetState: SchemaState) {
     return this.api.post<AnnotationSchema>(`/schemas/${id}/transition`, { target_state: targetState });
+  }
+
+  // Schema-center release: failure is recorded in the schema ledger and only the
+  // schema side is retried; console result sets are untouched.
+  publish(id: number, failureInjection = '') {
+    return this.api.post<AnnotationSchema>(`/schemas/${id}/publish`, { failure_injection: failureInjection });
+  }
+
+  deprecate(id: number) {
+    return this.api.post<{ schema: AnnotationSchema; impacted_result_sets: number; retained: boolean }>(
+      `/schemas/${id}/deprecate`,
+      {},
+    );
+  }
+
+  publishAttempts(id: number) {
+    return this.api.get<{ attempts: SchemaPublishAttempt[] }>(`/schemas/${id}/publish-attempts`);
   }
 }

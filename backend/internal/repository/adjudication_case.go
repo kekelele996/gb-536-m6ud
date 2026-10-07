@@ -127,3 +127,55 @@ func (repository *AdjudicationCaseRepository) Review(id uint, from, to string, r
 	}
 	return nil
 }
+
+// Suspend places an unresolved case on hold. Suspension keeps the adjudication
+// record and score intact; it is never a deletion.
+func (repository *AdjudicationCaseRepository) Suspend(id uint, fromState, reason string) error {
+	now := time.Now().UTC()
+	result := repository.db.Model(&model.AdjudicationCase{}).
+		Where("id = ? AND case_state = ?", id, fromState).
+		Updates(map[string]any{"case_state": "suspended", "suspended_reason": reason, "suspended_at": now})
+	if result.Error != nil {
+		return fmt.Errorf("suspend adjudication case: %w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return ErrStateConflict
+	}
+	return nil
+}
+
+// Resume returns a suspended case to the open queue after the schema center and
+// annotation console are reconciled.
+func (repository *AdjudicationCaseRepository) Resume(id uint) error {
+	result := repository.db.Model(&model.AdjudicationCase{}).
+		Where("id = ? AND case_state = ?", id, "suspended").
+		Updates(map[string]any{"case_state": "open", "suspended_reason": "", "suspended_at": nil})
+	if result.Error != nil {
+		return fmt.Errorf("resume adjudication case: %w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return ErrStateConflict
+	}
+	return nil
+}
+
+// ByDatasetAndItemKey returns cases for a dataset/item reconciliation key.
+func (repository *AdjudicationCaseRepository) ByDatasetAndItemKey(datasetID uint, itemKey string) ([]model.AdjudicationCase, error) {
+	var cases []model.AdjudicationCase
+	if err := repository.db.Preload("Dataset").
+		Where("dataset_id = ? AND item_key = ?", datasetID, itemKey).
+		Order("id ASC").Find(&cases).Error; err != nil {
+		return nil, fmt.Errorf("list cases by item: %w", err)
+	}
+	return cases, nil
+}
+
+// OrphanItemKeys returns case (dataset_code,item_key) pairs that do not resolve
+// to any console result set. Reconciliation suspends these cases.
+func (repository *AdjudicationCaseRepository) All() ([]model.AdjudicationCase, error) {
+	var cases []model.AdjudicationCase
+	if err := repository.db.Preload("Dataset").Order("id ASC").Find(&cases).Error; err != nil {
+		return nil, fmt.Errorf("list all adjudication cases: %w", err)
+	}
+	return cases, nil
+}

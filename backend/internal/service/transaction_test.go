@@ -60,7 +60,7 @@ func TestCaseTransitionRollsBackWhenAuditWriteFails(t *testing.T) {
 	}
 	failAuditWrites(t, db)
 	system := NewSystemService(repository.NewSystemRepository(db), "test-secret-with-at-least-24-bytes", 0)
-	target := NewAdjudicationCaseService(db, repository.NewAdjudicationCaseRepository(db), repository.NewAnnotationSetRepository(db), system, "v1")
+	target := NewAdjudicationCaseService(db, repository.NewAdjudicationCaseRepository(db), repository.NewAnnotationSetRepository(db), repository.NewAnnotationSchemaRepository(db), system, "v1")
 
 	_, err := target.caseTransition(caseRecord, constants.CaseAccepted, "Independent review accepted.", dto.Actor{
 		ID: reviewerID, Username: "reviewer", Role: constants.RoleAdjudicator,
@@ -98,7 +98,7 @@ func TestAcceptRequiresRecordedIndependentReviewer(t *testing.T) {
 		t.Fatalf("create case: %v", err)
 	}
 	system := NewSystemService(repository.NewSystemRepository(db), "test-secret-with-at-least-24-bytes", 0)
-	target := NewAdjudicationCaseService(db, repository.NewAdjudicationCaseRepository(db), repository.NewAnnotationSetRepository(db), system, "v1")
+	target := NewAdjudicationCaseService(db, repository.NewAdjudicationCaseRepository(db), repository.NewAnnotationSetRepository(db), repository.NewAnnotationSchemaRepository(db), system, "v1")
 
 	_, err := target.Accept(caseRecord.ID, dto.CaseReviewRequest{Note: "Attempt by another adjudicator."}, dto.Actor{
 		ID: 23, Username: "other", Role: constants.RoleAdjudicator,

@@ -112,6 +112,48 @@ func (handler *AdjudicationCaseHandler) Reopen(context *gin.Context) {
 	handler.reviewAction(context, handler.service.Reopen)
 }
 
+// Suspend puts an unresolved reconciliation case on hold.
+func (handler *AdjudicationCaseHandler) Suspend(context *gin.Context) {
+	id, err := PathID(context)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	var request struct {
+		Reason string `json:"reason" validate:"required,min=8,max=200"`
+	}
+	if err := BindAndValidate(context, &request); err != nil {
+		WriteError(context, err)
+		return
+	}
+	item, err := handler.service.Suspend(id, request.Reason, Actor(context), RequestID(context))
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WriteData(context, http.StatusOK, item)
+}
+
+// Resume re-opens a suspended case after the two sides are reconciled.
+func (handler *AdjudicationCaseHandler) Resume(context *gin.Context) {
+	id, err := PathID(context)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	var request dto.ResumeCaseRequest
+	if err := BindAndValidate(context, &request); err != nil {
+		WriteError(context, err)
+		return
+	}
+	item, err := handler.service.Resume(id, request, Actor(context), RequestID(context))
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WriteData(context, http.StatusOK, item)
+}
+
 func (handler *AdjudicationCaseHandler) reviewAction(context *gin.Context, action func(uint, dto.CaseReviewRequest, dto.Actor, string) (dto.AdjudicationCaseResponse, error)) {
 	id, err := PathID(context)
 	if err != nil {

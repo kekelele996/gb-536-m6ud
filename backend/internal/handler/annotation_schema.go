@@ -113,3 +113,52 @@ func (handler *AnnotationSchemaHandler) Transition(context *gin.Context) {
 	}
 	WriteData(context, http.StatusOK, item)
 }
+
+// Publish runs the schema-center-only release with an explicit ledger attempt.
+func (handler *AnnotationSchemaHandler) Publish(context *gin.Context) {
+	id, err := PathID(context)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	var request dto.PublishSchemaRequest
+	if err := BindAndValidate(context, &request); err != nil {
+		WriteError(context, err)
+		return
+	}
+	item, err := handler.service.Publish(id, request, Actor(context), RequestID(context))
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WriteData(context, http.StatusOK, item)
+}
+
+func (handler *AnnotationSchemaHandler) PublishAttempts(context *gin.Context) {
+	id, err := PathID(context)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	items, err := handler.service.PublishAttempts(id)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WriteData(context, http.StatusOK, gin.H{"attempts": items})
+}
+
+// Deprecate retires the version while retaining pinned console result sets.
+func (handler *AnnotationSchemaHandler) Deprecate(context *gin.Context) {
+	id, err := PathID(context)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	item, impacted, err := handler.service.Deprecate(id, Actor(context), RequestID(context))
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WriteData(context, http.StatusOK, gin.H{"schema": item, "impacted_result_sets": impacted, "retained": true})
+}

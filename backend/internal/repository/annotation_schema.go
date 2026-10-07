@@ -66,6 +66,41 @@ func (repository *AnnotationSchemaRepository) PublishedForDataset(datasetID uint
 	return schemas, nil
 }
 
+// CurrentPublishedForCode returns the active published version of a schema code
+// for a dataset, which is the "current schema" re-annotation must target.
+func (repository *AnnotationSchemaRepository) CurrentPublishedForCode(datasetID uint, schemaCode string) (model.AnnotationSchema, error) {
+	var schema model.AnnotationSchema
+	if err := repository.db.Where("dataset_id = ? AND schema_code = ? AND schema_state = ?", datasetID, schemaCode, "published").
+		Order("version DESC").First(&schema).Error; err != nil {
+		return schema, fmt.Errorf("find current published schema: %w", err)
+	}
+	return schema, nil
+}
+
+// VersionByCode resolves a specific released schema version independently of its
+// current state. Deprecated versions remain resolvable so pinned scores stay
+// explainable after deprecation.
+func (repository *AnnotationSchemaRepository) VersionByCode(datasetID uint, schemaCode string, version int) (model.AnnotationSchema, error) {
+	var schema model.AnnotationSchema
+	if err := repository.db.Where("dataset_id = ? AND schema_code = ? AND version = ?", datasetID, schemaCode, version).
+		First(&schema).Error; err != nil {
+		return schema, fmt.Errorf("find schema version by code: %w", err)
+	}
+	return schema, nil
+}
+
+// CountAnnotationsOnSchema counts operation-console result sets bound to the
+// given schema version. The schema center reads this for impact reporting only;
+// deprecation never deletes the rows.
+func (repository *AnnotationSchemaRepository) CountAnnotationsOnSchema(schemaID uint) (int64, error) {
+	var total int64
+	if err := repository.db.Model(&model.AnnotationSet{}).
+		Where("schema_id = ? OR pinned_schema_id = ?", schemaID, schemaID).Count(&total).Error; err != nil {
+		return 0, fmt.Errorf("count annotations on schema: %w", err)
+	}
+	return total, nil
+}
+
 func (repository *AnnotationSchemaRepository) UpdateDraft(schema *model.AnnotationSchema, expectedUpdatedAt time.Time) error {
 	result := repository.db.Model(&model.AnnotationSchema{}).
 		Where("id = ? AND version = ? AND schema_state = ? AND updated_at = ?", schema.ID, schema.Version, "draft", expectedUpdatedAt).

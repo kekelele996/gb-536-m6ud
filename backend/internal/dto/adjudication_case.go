@@ -59,11 +59,16 @@ type AdjudicationCaseResponse struct {
 	ItemKey                string            `json:"item_key"`
 	AnnotationSetIDs       []uint            `json:"annotation_set_ids"`
 	Agreement              AgreementDetails  `json:"agreement"`
+	SchemaCode             string            `json:"schema_code"`
+	SchemaVersion          int               `json:"schema_version"`
+	SchemaCurrent          bool              `json:"schema_current"`
 	DisagreementType       string            `json:"disagreement_type"`
 	ConfusionSnapshot      []ConfusionCell   `json:"confusion_snapshot"`
 	EvidenceSnapshot       []DiffEvidence    `json:"evidence_snapshot"`
 	ClusterKey             string            `json:"cluster_key"`
 	CaseState              string            `json:"case_state"`
+	SuspendedReason        string            `json:"suspended_reason"`
+	SuspendedAt            *time.Time        `json:"suspended_at"`
 	FinalLabels            []AnnotationLabel `json:"final_labels"`
 	Rationale              string            `json:"rationale"`
 	AdjudicatorID          *uint             `json:"adjudicator_id"`
@@ -78,4 +83,8 @@ type AdjudicationCaseResponse struct {
 	CreatedAt              time.Time         `json:"created_at"`
 	UpdatedAt              time.Time         `json:"updated_at"`
 	Reused                 bool              `json:"reused"`
+}
+
+type ResumeCaseRequest struct {
+	Note string `json:"note" validate:"required,min=8,max=500"`
 }

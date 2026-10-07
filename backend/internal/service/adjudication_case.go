@@ -23,13 +23,14 @@ type AdjudicationCaseService struct {
 	db               *gorm.DB
 	repository       *repository.AdjudicationCaseRepository
 	annotations      *repository.AnnotationSetRepository
+	schemas          *repository.AnnotationSchemaRepository
 	system           *SystemService
 	algorithmVersion string
 }
 
-func NewAdjudicationCaseService(db *gorm.DB, repository *repository.AdjudicationCaseRepository, annotations *repository.AnnotationSetRepository, system *SystemService, algorithmVersion string) *AdjudicationCaseService {
+func NewAdjudicationCaseService(db *gorm.DB, repository *repository.AdjudicationCaseRepository, annotations *repository.AnnotationSetRepository, schemas *repository.AnnotationSchemaRepository, system *SystemService, algorithmVersion string) *AdjudicationCaseService {
 	return &AdjudicationCaseService{
-		db: db, repository: repository, annotations: annotations,
+		db: db, repository: repository, annotations: annotations, schemas: schemas,
 		system: system, algorithmVersion: algorithmVersion,
 	}
 }
@@ -48,6 +49,16 @@ func (service *AdjudicationCaseService) Compute(request dto.ComputeAdjudicationR
 	labelsBySet, ratingSets, schema, err := validateComparableAnnotations(annotations, request)
 	if err != nil {
 		return dto.AdjudicationCaseResponse{}, false, err
+	}
+	// Scores are computed only against the currently effective schema version.
+	// A deprecated pin requires re-annotation against the current release first.
+	if schema.SchemaState == constants.SchemaDeprecated {
+		return dto.AdjudicationCaseResponse{}, false, Unprocessable("schema_version_deprecated",
+			"the pinned schema version is deprecated; re-annotate against the current published version before scoring", nil)
+	}
+	if schema.SchemaState != constants.SchemaPublished {
+		return dto.AdjudicationCaseResponse{}, false, Unprocessable("schema_not_published",
+			"agreement scoring requires a currently published schema version", nil)
 	}
 	inputHash := adjudicationInputHash(annotations, request, service.algorithmVersion)
 	if existing, findErr := service.repository.FindByIdempotencyKey(idempotencyKey); findErr == nil {
@@ -89,6 +100,7 @@ func (service *AdjudicationCaseService) Compute(request dto.ComputeAdjudicationR
 		ConfusionSnapshotJSON: string(confusionJSON), EvidenceSnapshotJSON: string(evidenceJSON),
 		ClusterKey: matching.ClusterKey(schema.SchemaCode, disagreementType, labelPair),
 		CaseState:  constants.CaseOpen, FinalLabelsJSON: "[]", Rationale: "",
+		SchemaCode: schema.SchemaCode, SchemaVersion: schema.Version,
 		InputHash: inputHash, AlgorithmVersion: service.algorithmVersion,
 		IdempotencyKey: idempotencyKey, CreatedBy: actor.ID,
 	}
@@ -132,7 +144,9 @@ func (service *AdjudicationCaseService) Get(id uint) (dto.AdjudicationCaseRespon
 	if err != nil {
 		return dto.AdjudicationCaseResponse{}, MapRepositoryError("adjudication case", err)
 	}
-	return adjudicationResponse(adjudication), nil
+	response := adjudicationResponse(adjudication)
+	service.AnnotateSchemaCurrent(&response)
+	return response, nil
 }
 
 func (service *AdjudicationCaseService) List(page, pageSize int, datasetID uint, state, disagreementType, clusterKey string) ([]dto.AdjudicationCaseResponse, dto.PageMeta, error) {
@@ -142,7 +156,9 @@ func (service *AdjudicationCaseService) List(page, pageSize int, datasetID uint,
 	}
 	responses := make([]dto.AdjudicationCaseResponse, 0, len(cases))
 	for _, adjudication := range cases {
-		responses = append(responses, adjudicationResponse(adjudication))
+		response := adjudicationResponse(adjudication)
+		service.AnnotateSchemaCurrent(&response)
+		responses = append(responses, response)
 	}
 	return responses, PageMeta(page, pageSize, total), nil
 }
@@ -278,6 +294,64 @@ func (service *AdjudicationCaseService) Reopen(id uint, request dto.CaseReviewRe
 		return dto.AdjudicationCaseResponse{}, Forbidden("only the independent reviewer can reopen this case")
 	}
 	return service.caseTransition(before, constants.CaseReopened, request.Note, actor, requestID)
+}
+
+// Suspend places an unresolved reconciliation case on hold. The score and the
+// pinned schema snapshot are retained; the case is reclaimed after reconcile.
+func (service *AdjudicationCaseService) Suspend(id uint, reason string, actor dto.Actor, requestID string) (dto.AdjudicationCaseResponse, error) {
+	before, err := service.repository.Get(id)
+	if err != nil {
+		return dto.AdjudicationCaseResponse{}, MapRepositoryError("adjudication case", err)
+	}
+	if !constants.CanSuspendCase(before.CaseState) {
+		return dto.AdjudicationCaseResponse{}, Conflict("invalid_case_transition",
+			"only open, reopened or assigned cases may be suspended", repository.ErrStateConflict)
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return dto.AdjudicationCaseResponse{}, BadRequest("suspend_reason_required", "a suspension reason is required")
+	}
+	err = service.db.Transaction(func(tx *gorm.DB) error {
+		if suspendErr := service.repository.WithDB(tx).Suspend(id, before.CaseState, reason); suspendErr != nil {
+			return Conflict("state_conflict", "case changed while it was suspended", suspendErr)
+		}
+		after, reloadErr := service.repository.WithDB(tx).Get(id)
+		if reloadErr != nil {
+			return Internal("could not reload adjudication case", reloadErr)
+		}
+		return service.system.RecordAuditTx(tx, actor, requestID, "adjudication_case.suspended", "adjudication_case", auditID(id),
+			map[string]any{"reason": reason}, caseSummary(before), caseSummary(after))
+	})
+	if err != nil {
+		return dto.AdjudicationCaseResponse{}, err
+	}
+	return service.Get(id)
+}
+
+// Resume returns a reconciled suspended case to the open queue.
+func (service *AdjudicationCaseService) Resume(id uint, request dto.ResumeCaseRequest, actor dto.Actor, requestID string) (dto.AdjudicationCaseResponse, error) {
+	before, err := service.repository.Get(id)
+	if err != nil {
+		return dto.AdjudicationCaseResponse{}, MapRepositoryError("adjudication case", err)
+	}
+	if before.CaseState != constants.CaseSuspended {
+		return dto.AdjudicationCaseResponse{}, Conflict("invalid_case_transition", "only suspended cases can be resumed", repository.ErrStateConflict)
+	}
+	err = service.db.Transaction(func(tx *gorm.DB) error {
+		if resumeErr := service.repository.WithDB(tx).Resume(id); resumeErr != nil {
+			return Conflict("state_conflict", "case changed while it was resumed", resumeErr)
+		}
+		after, reloadErr := service.repository.WithDB(tx).Get(id)
+		if reloadErr != nil {
+			return Internal("could not reload adjudication case", reloadErr)
+		}
+		return service.system.RecordAuditTx(tx, actor, requestID, "adjudication_case.resumed", "adjudication_case", auditID(id),
+			map[string]any{"note_present": strings.TrimSpace(request.Note) != ""}, caseSummary(before), caseSummary(after))
+	})
+	if err != nil {
+		return dto.AdjudicationCaseResponse{}, err
+	}
+	return service.Get(id)
 }
 
 func (service *AdjudicationCaseService) caseTransition(before model.AdjudicationCase, target, note string, actor dto.Actor, requestID string) (dto.AdjudicationCaseResponse, error) {
@@ -427,7 +501,7 @@ func adjudicationResponse(adjudication model.AdjudicationCase) dto.AdjudicationC
 	_ = json.Unmarshal([]byte(adjudication.ConfusionSnapshotJSON), &confusion)
 	_ = json.Unmarshal([]byte(adjudication.EvidenceSnapshotJSON), &evidence)
 	_ = json.Unmarshal([]byte(adjudication.FinalLabelsJSON), &finalLabels)
-	return dto.AdjudicationCaseResponse{
+	response := dto.AdjudicationCaseResponse{
 		ID: adjudication.ID, DatasetID: adjudication.DatasetID, DatasetCode: adjudication.Dataset.DatasetCode,
 		ItemKey: adjudication.ItemKey, AnnotationSetIDs: ids,
 		Agreement: dto.AgreementDetails{
@@ -438,11 +512,26 @@ func adjudicationResponse(adjudication model.AdjudicationCase) dto.AdjudicationC
 		},
 		DisagreementType: adjudication.DisagreementType, ConfusionSnapshot: confusion,
 		EvidenceSnapshot: evidence, ClusterKey: adjudication.ClusterKey, CaseState: adjudication.CaseState,
+		SchemaCode: adjudication.SchemaCode, SchemaVersion: adjudication.SchemaVersion,
+		SuspendedReason: adjudication.SuspendedReason, SuspendedAt: adjudication.SuspendedAt,
 		FinalLabels: finalLabels, Rationale: adjudication.Rationale, AdjudicatorID: adjudication.AdjudicatorID,
 		ReviewedBy: adjudication.ReviewedBy, DecidedAt: adjudication.DecidedAt, InputHash: adjudication.InputHash,
 		AlgorithmVersion: adjudication.AlgorithmVersion, IdempotencyKey: adjudication.IdempotencyKey,
 		DecisionIdempotencyKey: adjudication.DecisionIdempotencyKey, ReopenCount: adjudication.ReopenCount,
 		CreatedBy: adjudication.CreatedBy, CreatedAt: adjudication.CreatedAt, UpdatedAt: adjudication.UpdatedAt,
+	}
+	return response
+}
+
+// AnnotateSchemaCurrent flags whether the score's pinned schema version is still
+// the active release.
+func (service *AdjudicationCaseService) AnnotateSchemaCurrent(response *dto.AdjudicationCaseResponse) {
+	if service.schemas == nil || response.SchemaCode == "" || response.SchemaVersion == 0 {
+		return
+	}
+	schema, err := service.schemas.VersionByCode(response.DatasetID, response.SchemaCode, response.SchemaVersion)
+	if err == nil {
+		response.SchemaCurrent = schema.SchemaState == constants.SchemaPublished
 	}
 }
 

@@ -22,6 +22,8 @@ import (
 	"corpus-annotation-agreement-control/backend/internal/dto"
 	"corpus-annotation-agreement-control/backend/internal/matching"
 	"corpus-annotation-agreement-control/backend/internal/model"
+	"corpus-annotation-agreement-control/backend/internal/repository"
+	"corpus-annotation-agreement-control/backend/internal/service"
 )
 
 type Config struct {
@@ -87,6 +89,7 @@ func OpenDatabase(cfg Config) (*gorm.DB, error) {
 		if err := db.AutoMigrate(
 			&model.User{}, &model.CorpusDataset{}, &model.AnnotationSchema{},
 			&model.AnnotationSet{}, &model.AdjudicationCase{}, &model.AuditEvent{},
+			&model.SchemaPublishAttempt{}, &model.LegacySchemaBinding{},
 		); err != nil {
 			return nil, fmt.Errorf("migrate database: %w", err)
 		}
@@ -94,7 +97,21 @@ func OpenDatabase(cfg Config) (*gorm.DB, error) {
 	if err := seed(db, cfg); err != nil {
 		return nil, fmt.Errorf("seed database: %w", err)
 	}
+	// Backfill effective schema versions on legacy result sets and list any row
+	// that cannot be resolved deterministically.
+	if err := backfillLegacySchemaBindings(db); err != nil {
+		return nil, fmt.Errorf("backfill legacy schema bindings: %w", err)
+	}
 	return db, nil
+}
+
+func backfillLegacySchemaBindings(db *gorm.DB) error {
+	annotations := repository.NewAnnotationSetRepository(db)
+	schemas := repository.NewAnnotationSchemaRepository(db)
+	legacy := repository.NewLegacyBindingRepository(db)
+	upgrade := service.NewUpgradeService(db, annotations, schemas, legacy)
+	_, err := upgrade.BackfillLegacySchemaBindings()
+	return err
 }
 
 func seed(db *gorm.DB, cfg Config) error {
@@ -194,12 +211,18 @@ func seed(db *gorm.DB, cfg Config) error {
 			DatasetID: dataset.ID, SchemaID: schema.ID, AnnotatorID: users["annotator_a"].ID,
 			ItemKey: "DOC-7F2A", LabelsJSON: string(leftJSON), SourceChecksum: digest("DOC-7F2A-source-v1"),
 			AnnotationState: constants.AnnotationCompared, SubmittedAt: &submitted,
+			SchemaCode: schema.SchemaCode, SchemaVersion: schema.Version,
+			PinnedSchemaID: &schema.ID, PinnedAt: &submitted,
+			SubmittedSourceChecksum: digest("DOC-7F2A-source-v1"), SchemaBindingState: constants.BindingCurrent,
 			QualityNote: "Boundary follows the published half-open offset rule.",
 		},
 		{
 			DatasetID: dataset.ID, SchemaID: schema.ID, AnnotatorID: users["annotator_b"].ID,
 			ItemKey: "DOC-7F2A", LabelsJSON: string(rightJSON), SourceChecksum: digest("DOC-7F2A-source-v1-b"),
 			AnnotationState: constants.AnnotationCompared, SubmittedAt: &submitted,
+			SchemaCode: schema.SchemaCode, SchemaVersion: schema.Version,
+			PinnedSchemaID: &schema.ID, PinnedAt: &submitted,
+			SubmittedSourceChecksum: digest("DOC-7F2A-source-v1-b"), SchemaBindingState: constants.BindingCurrent,
 			QualityNote: "Potential leading honorific included in party boundary.",
 		},
 	}
@@ -230,6 +253,7 @@ func seed(db *gorm.DB, cfg Config) error {
 		EvidenceSnapshotJSON: string(evidenceJSON),
 		ClusterKey:           matching.ClusterKey(schema.SchemaCode, disagreementType, labelPair),
 		CaseState:            constants.CaseOpen, FinalLabelsJSON: "[]", Rationale: "",
+		SchemaCode: schema.SchemaCode, SchemaVersion: schema.Version,
 		InputHash: inputHash, AlgorithmVersion: cfg.AlgorithmVersion,
 		IdempotencyKey: "seed-agreement-doc-7f2a", CreatedBy: users["manager"].ID,
 	}

@@ -55,6 +55,14 @@ export class AdjudicationCaseStore {
     this.mutate(this.api.reopen(adjudication.id, note));
   }
 
+  suspend(adjudication: AdjudicationCase, reason: string): void {
+    this.mutate(this.api.suspend(adjudication.id, reason));
+  }
+
+  resume(adjudication: AdjudicationCase, note: string): void {
+    this.mutate(this.api.resume(adjudication.id, note));
+  }
+
   private mutate(request: Observable<ApiEnvelope<AdjudicationCase>>): void {
     this.loading.set(true);
     this.error.set('');

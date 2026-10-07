@@ -30,6 +30,10 @@ type AdjudicationCase struct {
 	IdempotencyKey         string        `gorm:"size:120;uniqueIndex;not null"`
 	DecisionIdempotencyKey *string       `gorm:"size:120;uniqueIndex"`
 	ReopenCount            int           `gorm:"not null;default:0"`
+	SchemaCode             string        `gorm:"size:64;index;not null;default:''"`
+	SchemaVersion          int           `gorm:"not null;default:0"`
+	SuspendedReason        string        `gorm:"size:200;not null;default:''"`
+	SuspendedAt            *time.Time    `gorm:"index"`
 	CreatedBy              uint          `gorm:"index;not null"`
 	CreatedAt              time.Time     `gorm:"not null"`
 	UpdatedAt              time.Time     `gorm:"not null"`
