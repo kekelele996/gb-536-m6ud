@@ -39,8 +39,8 @@ export class AnnotationSetStore {
     this.mutate(this.api.update(id, payload), done);
   }
 
-  transition(annotation: AnnotationSet, target: AnnotationState, reason = ''): void {
-    this.mutate(this.api.transition(annotation.id, target, reason));
+  transition(annotation: AnnotationSet, target: AnnotationState, reason = '', sourceChecksum?: string): void {
+    this.mutate(this.api.transition(annotation.id, target, reason, sourceChecksum));
   }
 
   private mutate(request: Observable<ApiEnvelope<AnnotationSet>>, done?: () => void): void {

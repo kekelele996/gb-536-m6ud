@@ -92,3 +92,24 @@ func (handler *AnnotationSetHandler) Transition(context *gin.Context) {
 	}
 	WriteData(context, http.StatusOK, item)
 }
+
+// BackfillPins upgrades historical result sets without a schema-version pin.
+// It is an operations-console action and never changes schema center state.
+func (handler *AnnotationSetHandler) BackfillPins(context *gin.Context) {
+	report, err := handler.service.BackfillSchemaVersions(Actor(context), RequestID(context))
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WriteData(context, http.StatusOK, report)
+}
+
+func (handler *AnnotationSetHandler) UnresolvedPins(context *gin.Context) {
+	page, pageSize := Pagination(context)
+	items, meta, err := handler.service.UnresolvedPage(page, pageSize)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WritePage(context, items, meta)
+}

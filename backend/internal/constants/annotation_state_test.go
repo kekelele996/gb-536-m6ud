@@ -36,11 +36,31 @@ func TestAdjudicationTransitions(t *testing.T) {
 		{CaseReopened, CaseAssigned, true},
 		{CaseOpen, CaseAccepted, false},
 		{CaseAccepted, CaseReopened, false},
+		{CaseSuspended, CaseAssigned, false},
+		{CaseOpen, CaseSuspended, false},
 	}
 	for _, test := range tests {
 		if actual := CanTransitionCase(test.from, test.to); actual != test.allowed {
 			t.Errorf("%s -> %s = %v, want %v", test.from, test.to, actual, test.allowed)
 		}
+	}
+}
+
+func TestSuspendedCaseLifecyclePredicates(t *testing.T) {
+	if !CaseIsOpen(CaseAssigned) || CaseIsOpen(CaseSuspended) || CaseIsOpen(CaseAccepted) {
+		t.Fatal("case open-state predicate is incorrect")
+	}
+	if !CanResumeSuspendedCase(CaseOpen) || !CanResumeSuspendedCase(CaseReviewed) {
+		t.Fatal("resumable suspended states are incorrect")
+	}
+	if CanResumeSuspendedCase(CaseSuspended) || CanResumeSuspendedCase(CaseAccepted) {
+		t.Fatal("suspended and accepted cases must not be resumable targets")
+	}
+	if !ValidSchemaPinStatus(SchemaPinPinned) || !ValidSchemaPinStatus(SchemaPinLegacy) || !ValidSchemaPinStatus(SchemaPinUnresolved) {
+		t.Fatal("schema pin statuses are incomplete")
+	}
+	if ValidSchemaPinStatus("current") {
+		t.Fatal("unexpected schema pin status accepted")
 	}
 }
 

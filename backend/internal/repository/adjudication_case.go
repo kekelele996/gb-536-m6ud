@@ -127,3 +127,63 @@ func (repository *AdjudicationCaseRepository) Review(id uint, from, to string, r
 	}
 	return nil
 }
+
+// OpenCases returns cases that reconciliation must inspect. Accepted cases
+// are historical records and suspended cases are already on hold.
+func (repository *AdjudicationCaseRepository) OpenCases(datasetID uint, itemKey string) ([]model.AdjudicationCase, error) {
+	query := repository.db.Model(&model.AdjudicationCase{}).
+		Where("case_state <> ? AND case_state <> ?", "accepted", "suspended")
+	if datasetID > 0 {
+		query = query.Where("dataset_id = ?", datasetID)
+	}
+	if itemKey != "" {
+		query = query.Where("item_key = ?", itemKey)
+	}
+	var cases []model.AdjudicationCase
+	if err := query.Preload("Dataset").Order("id ASC").Find(&cases).Error; err != nil {
+		return nil, fmt.Errorf("list open adjudication cases: %w", err)
+	}
+	return cases, nil
+}
+
+// Suspend moves an open case onto reconciliation hold, remembering the state
+// to restore once the two sides agree again. Deprecated-schema holds never
+// auto-resume because deprecated data must be re-annotated, not unblocked.
+func (repository *AdjudicationCaseRepository) Suspend(id uint, previous, reasonCode, reason string, at time.Time) error {
+	result := repository.db.Model(&model.AdjudicationCase{}).
+		Where("id = ? AND case_state = ?", id, previous).
+		Updates(map[string]any{
+			"case_state":           "suspended",
+			"state_before_suspend": previous,
+			"suspend_reason_code":  reasonCode,
+			"suspend_reason":       reason,
+			"suspended_at":         at,
+		})
+	if result.Error != nil {
+		return fmt.Errorf("suspend adjudication case: %w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return ErrStateConflict
+	}
+	return nil
+}
+
+// Resume releases a reconciliation hold and restores the remembered state.
+func (repository *AdjudicationCaseRepository) Resume(id uint, previous string, at time.Time) error {
+	result := repository.db.Model(&model.AdjudicationCase{}).
+		Where("id = ? AND case_state = ? AND state_before_suspend = ?", id, "suspended", previous).
+		Updates(map[string]any{
+			"case_state":           previous,
+			"state_before_suspend": "",
+			"suspend_reason_code":  "",
+			"suspend_reason":       "",
+			"suspended_at":         nil,
+		})
+	if result.Error != nil {
+		return fmt.Errorf("resume adjudication case: %w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return ErrStateConflict
+	}
+	return nil
+}

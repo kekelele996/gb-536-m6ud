@@ -152,6 +152,9 @@ func (service *AdjudicationCaseService) Assign(id uint, request dto.AssignCaseRe
 	if err != nil {
 		return dto.AdjudicationCaseResponse{}, MapRepositoryError("adjudication case", err)
 	}
+	if before.CaseState == constants.CaseSuspended {
+		return dto.AdjudicationCaseResponse{}, Conflict("case_suspended", "the case is on reconciliation hold and cannot be claimed", repository.ErrStateConflict)
+	}
 	if before.CaseState != constants.CaseOpen && before.CaseState != constants.CaseReopened {
 		return dto.AdjudicationCaseResponse{}, Conflict("invalid_case_transition", "only open or reopened cases can be assigned", repository.ErrStateConflict)
 	}
@@ -189,6 +192,9 @@ func (service *AdjudicationCaseService) Decide(id uint, request dto.AdjudicateCa
 	before, err := service.repository.Get(id)
 	if err != nil {
 		return dto.AdjudicationCaseResponse{}, false, MapRepositoryError("adjudication case", err)
+	}
+	if before.CaseState == constants.CaseSuspended {
+		return dto.AdjudicationCaseResponse{}, false, Conflict("case_suspended", "the case is on reconciliation hold and cannot be adjudicated", repository.ErrStateConflict)
 	}
 	if before.DecisionIdempotencyKey != nil {
 		if *before.DecisionIdempotencyKey == idempotencyKey {
@@ -281,6 +287,9 @@ func (service *AdjudicationCaseService) Reopen(id uint, request dto.CaseReviewRe
 }
 
 func (service *AdjudicationCaseService) caseTransition(before model.AdjudicationCase, target, note string, actor dto.Actor, requestID string) (dto.AdjudicationCaseResponse, error) {
+	if before.CaseState == constants.CaseSuspended {
+		return dto.AdjudicationCaseResponse{}, Conflict("case_suspended", "the case is on reconciliation hold and cannot be reviewed", repository.ErrStateConflict)
+	}
 	if !constants.CanTransitionCase(before.CaseState, target) {
 		return dto.AdjudicationCaseResponse{}, Conflict("invalid_case_transition",
 			"case transition is not allowed from "+before.CaseState+" to "+target, repository.ErrStateConflict)
@@ -317,10 +326,22 @@ func validateComparableAnnotations(annotations []model.AnnotationSet, request dt
 		if annotation.DatasetID != request.DatasetID || annotation.ItemKey != request.ItemKey {
 			return nil, nil, model.AnnotationSchema{}, Unprocessable("annotation_set_mismatch", "all annotation sets must belong to the requested dataset item", nil)
 		}
+		if annotation.SchemaPinStatus != constants.SchemaPinPinned {
+			return nil, nil, model.AnnotationSchema{}, Unprocessable("schema_version_unpinned", "result sets must pin the schema version effective at submission before scoring", nil)
+		}
 		if index == 0 {
 			schema = annotation.Schema
 		} else if annotation.SchemaID != schema.ID {
 			return nil, nil, model.AnnotationSchema{}, Unprocessable("incompatible_schema", "all annotation sets must use the same schema version", nil)
+		}
+		if annotation.PinnedSchemaCode != schema.SchemaCode || annotation.PinnedSchemaVersion != schema.Version || annotation.PinnedSourceChecksum != annotation.SourceChecksum {
+			return nil, nil, model.AnnotationSchema{}, Unprocessable("schema_pin_conflict", "the pinned submission snapshot does not reconcile with the stored result set", nil)
+		}
+		if schema.SchemaState == constants.SchemaDeprecated {
+			return nil, nil, model.AnnotationSchema{}, Unprocessable("schema_deprecated", "the pinned schema version is deprecated; re-annotate the item against the current schema before scoring", nil)
+		}
+		if schema.SchemaState != constants.SchemaPublished {
+			return nil, nil, model.AnnotationSchema{}, Unprocessable("incompatible_schema", "agreement scoring requires a currently published schema version", nil)
 		}
 		if annotation.AnnotationState != constants.AnnotationLocked && annotation.AnnotationState != constants.AnnotationCompared {
 			return nil, nil, model.AnnotationSchema{}, Conflict("annotation_not_locked", "annotation sets must be locked before comparison", repository.ErrStateConflict)
@@ -442,6 +463,8 @@ func adjudicationResponse(adjudication model.AdjudicationCase) dto.AdjudicationC
 		ReviewedBy: adjudication.ReviewedBy, DecidedAt: adjudication.DecidedAt, InputHash: adjudication.InputHash,
 		AlgorithmVersion: adjudication.AlgorithmVersion, IdempotencyKey: adjudication.IdempotencyKey,
 		DecisionIdempotencyKey: adjudication.DecisionIdempotencyKey, ReopenCount: adjudication.ReopenCount,
+		SuspendReasonCode: adjudication.SuspendReasonCode, SuspendReason: adjudication.SuspendReason,
+		StateBeforeSuspend: adjudication.StateBeforeSuspend, SuspendedAt: adjudication.SuspendedAt,
 		CreatedBy: adjudication.CreatedBy, CreatedAt: adjudication.CreatedAt, UpdatedAt: adjudication.UpdatedAt,
 	}
 }

@@ -1,4 +1,4 @@
-import { AnnotationState } from './enums/annotation-state';
+import { AnnotationState, SchemaPinStatus } from './enums/annotation-state';
 
 export interface AnnotationLabel {
   unit_key: string;
@@ -23,6 +23,12 @@ export interface AnnotationSet {
   submitted_at?: string;
   supersedes_id?: number;
   quality_note: string;
+  schema_pin_status: SchemaPinStatus;
+  pinned_schema_code: string;
+  pinned_schema_version: number;
+  pinned_source_checksum: string;
+  pinned_at?: string;
+  backfill_note: string;
   created_at: string;
   updated_at: string;
 }

@@ -11,6 +11,10 @@ export class AnnotationSetApi {
     return this.api.page<AnnotationSet>('/annotations', { page_size: 150, dataset_id: datasetId, item_key: itemKey });
   }
 
+  unresolved() {
+    return this.api.page<AnnotationSet>('/annotations/unresolved', { page_size: 150 });
+  }
+
   get(id: number) {
     return this.api.get<AnnotationSet>(`/annotations/${id}`);
   }
@@ -23,7 +27,9 @@ export class AnnotationSetApi {
     return this.api.put<AnnotationSet>(`/annotations/${id}`, payload);
   }
 
-  transition(id: number, targetState: AnnotationState, reason = '') {
-    return this.api.post<AnnotationSet>(`/annotations/${id}/transition`, { target_state: targetState, reason });
+  transition(id: number, targetState: AnnotationState, reason = '', sourceChecksum?: string) {
+    return this.api.post<AnnotationSet>(`/annotations/${id}/transition`, {
+      target_state: targetState, reason, source_checksum: sourceChecksum,
+    });
   }
 }

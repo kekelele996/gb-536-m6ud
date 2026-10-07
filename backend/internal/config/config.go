@@ -189,18 +189,23 @@ func seed(db *gorm.DB, cfg Config) error {
 	leftJSON, _ := json.Marshal(leftLabels)
 	rightJSON, _ := json.Marshal(rightLabels)
 	submitted := time.Now().UTC().Add(-30 * time.Hour)
+	pinned := submitted
 	annotations := []model.AnnotationSet{
 		{
 			DatasetID: dataset.ID, SchemaID: schema.ID, AnnotatorID: users["annotator_a"].ID,
 			ItemKey: "DOC-7F2A", LabelsJSON: string(leftJSON), SourceChecksum: digest("DOC-7F2A-source-v1"),
 			AnnotationState: constants.AnnotationCompared, SubmittedAt: &submitted,
-			QualityNote: "Boundary follows the published half-open offset rule.",
+			QualityNote:     "Boundary follows the published half-open offset rule.",
+			SchemaPinStatus: constants.SchemaPinPinned, PinnedSchemaCode: schema.SchemaCode,
+			PinnedSchemaVersion: schema.Version, PinnedSourceChecksum: digest("DOC-7F2A-source-v1"), PinnedAt: &pinned,
 		},
 		{
 			DatasetID: dataset.ID, SchemaID: schema.ID, AnnotatorID: users["annotator_b"].ID,
 			ItemKey: "DOC-7F2A", LabelsJSON: string(rightJSON), SourceChecksum: digest("DOC-7F2A-source-v1-b"),
 			AnnotationState: constants.AnnotationCompared, SubmittedAt: &submitted,
-			QualityNote: "Potential leading honorific included in party boundary.",
+			QualityNote:     "Potential leading honorific included in party boundary.",
+			SchemaPinStatus: constants.SchemaPinPinned, PinnedSchemaCode: schema.SchemaCode,
+			PinnedSchemaVersion: schema.Version, PinnedSourceChecksum: digest("DOC-7F2A-source-v1-b"), PinnedAt: &pinned,
 		},
 	}
 	if err := db.Create(&annotations).Error; err != nil {

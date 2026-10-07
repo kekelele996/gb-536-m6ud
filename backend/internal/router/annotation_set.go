@@ -19,4 +19,10 @@ func registerAnnotationSetRoutes(group *gin.RouterGroup, target *handler.Annotat
 	routes.POST("/:id/transition",
 		middleware.RBAC(constants.RoleAnnotator, constants.RoleDataManager, constants.RoleAdjudicator, constants.RoleAdmin),
 		middleware.RateLimit(60, "annotation_submit"), target.Transition)
+
+	// Operations-console schema-version backfill for historical results.
+	manager := group.Group("/annotations")
+	manager.Use(middleware.RBAC(constants.RoleDataManager, constants.RoleAdmin))
+	manager.POST("/backfill", target.BackfillPins)
+	manager.GET("/unresolved", target.UnresolvedPins)
 }

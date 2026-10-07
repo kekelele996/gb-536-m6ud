@@ -161,6 +161,44 @@ func PageMeta(page, pageSize int, total int64) dto.PageMeta {
 	return dto.PageMeta{Page: page, PageSize: pageSize, Total: total, TotalPages: int(math.Ceil(float64(total) / float64(pageSize)))}
 }
 
+// ReconciliationRuns projects reconciliation audit events as run history.
+func (service *SystemService) ReconciliationRuns(page, pageSize int) ([]dto.ReconciliationRunResponse, dto.PageMeta, error) {
+	events, total, err := service.repository.ReconciliationRuns(page, pageSize)
+	if err != nil {
+		return nil, dto.PageMeta{}, Internal("could not list reconciliation runs", err)
+	}
+	responses := make([]dto.ReconciliationRunResponse, 0, len(events))
+	for _, event := range events {
+		params := decodeSummary(event.ParametersJSON)
+		responses = append(responses, dto.ReconciliationRunResponse{
+			ID: event.ID, Scope: summaryString(params, "scope"), DatasetID: uint(summaryInt(params, "dataset_id")),
+			ItemKey: summaryString(params, "item_key"), CasesChecked: summaryInt(params, "checked"),
+			CasesSuspended: summaryInt(params, "suspended"), CasesResumed: summaryInt(params, "resumed"),
+			OpenMismatches: summaryInt(params, "open_mismatches"), Findings: []dto.ReconciliationFinding{},
+			TriggeredBy: event.ActorID, CompletedAt: event.CreatedAt, CreatedAt: event.CreatedAt,
+		})
+	}
+	return responses, PageMeta(page, pageSize, total), nil
+}
+
+func summaryString(values map[string]interface{}, key string) string {
+	if value, ok := values[key].(string); ok {
+		return value
+	}
+	return ""
+}
+
+func summaryInt(values map[string]interface{}, key string) int {
+	switch value := values[key].(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	default:
+		return 0
+	}
+}
+
 func encodeSummary(value any) string {
 	if value == nil {
 		return "{}"

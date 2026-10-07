@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -50,6 +51,7 @@ func (service *AnnotationSetService) Create(request dto.CreateAnnotationSetReque
 		ItemKey: strings.TrimSpace(request.ItemKey), LabelsJSON: string(labelsJSON),
 		SourceChecksum: strings.ToLower(request.SourceChecksum), AnnotationState: constants.AnnotationDraft,
 		SupersedesID: request.SupersedesID, QualityNote: strings.TrimSpace(request.QualityNote),
+		SchemaPinStatus: constants.SchemaPinLegacy,
 	}
 	err = service.db.Transaction(func(tx *gorm.DB) error {
 		annotations := service.repository.WithDB(tx)
@@ -154,14 +156,40 @@ func (service *AnnotationSetService) Transition(id uint, request dto.AnnotationT
 	if err := authorizeAnnotationTransition(before, request.TargetState, actor); err != nil {
 		return dto.AnnotationSetResponse{}, err
 	}
+	submitting := request.TargetState == constants.AnnotationSubmitted
+	if submitting {
+		if before.Schema.SchemaState != constants.SchemaPublished {
+			return dto.AnnotationSetResponse{}, Unprocessable("schema_not_current",
+				"a result can only be submitted against a currently published schema version; re-annotate on the current schema", nil)
+		}
+		if submittedChecksum := strings.ToLower(strings.TrimSpace(request.SourceChecksum)); submittedChecksum != "" && submittedChecksum != before.SourceChecksum {
+			return dto.AnnotationSetResponse{}, Conflict("source_checksum_mismatch",
+				"the submitted source checksum does not match the stored result-set checksum", repository.ErrVersionConflict)
+		}
+	}
 	err = service.db.Transaction(func(tx *gorm.DB) error {
-		if transitionErr := service.repository.WithDB(tx).Transition(id, before.AnnotationState, request.TargetState); transitionErr != nil {
+		annotations := service.repository.WithDB(tx)
+		if transitionErr := annotations.Transition(id, before.AnnotationState, request.TargetState); transitionErr != nil {
 			return Conflict("state_conflict", "annotation state changed concurrently", transitionErr)
 		}
 		after := before
 		after.AnnotationState = request.TargetState
+		if submitting {
+			if _, pinErr := annotations.PinOnSubmit(id, before.Schema.SchemaCode, before.Schema.Version, before.SourceChecksum); pinErr != nil {
+				return Conflict("state_conflict", "submitted result could not pin its schema version", pinErr)
+			}
+			after.SchemaPinStatus = constants.SchemaPinPinned
+			after.PinnedSchemaCode = before.Schema.SchemaCode
+			after.PinnedSchemaVersion = before.Schema.Version
+			after.PinnedSourceChecksum = before.SourceChecksum
+		}
 		return service.system.RecordAuditTx(tx, actor, requestID, "annotation_set."+request.TargetState, "annotation_set", auditID(id),
-			map[string]any{"reason_present": strings.TrimSpace(request.Reason) != ""},
+			map[string]any{
+				"reason_present":      strings.TrimSpace(request.Reason) != "",
+				"schema_pin_status":   after.SchemaPinStatus,
+				"pinned_schema_code":  after.PinnedSchemaCode,
+				"pinned_schema_value": after.PinnedSchemaVersion,
+			},
 			annotationSummary(before, labelCount(before.LabelsJSON)), annotationSummary(after, labelCount(before.LabelsJSON)))
 	})
 	if err != nil {
@@ -227,6 +255,9 @@ func annotationResponse(annotation model.AnnotationSet) dto.AnnotationSetRespons
 		AnnotatorID: annotation.AnnotatorID, Annotator: annotation.Annotator.Username, ItemKey: annotation.ItemKey,
 		Labels: labels, SourceChecksum: annotation.SourceChecksum, AnnotationState: annotation.AnnotationState,
 		SubmittedAt: annotation.SubmittedAt, SupersedesID: annotation.SupersedesID, QualityNote: annotation.QualityNote,
+		SchemaPinStatus: annotation.SchemaPinStatus, PinnedSchemaCode: annotation.PinnedSchemaCode,
+		PinnedSchemaVersion: annotation.PinnedSchemaVersion, PinnedSourceChecksum: annotation.PinnedSourceChecksum,
+		PinnedAt: annotation.PinnedAt, BackfillNote: annotation.BackfillNote,
 		CreatedAt: annotation.CreatedAt, UpdatedAt: annotation.UpdatedAt,
 	}
 }
@@ -242,5 +273,92 @@ func annotationSummary(annotation model.AnnotationSet, labels int) map[string]an
 		"dataset_id": annotation.DatasetID, "schema_id": annotation.SchemaID, "annotator_id": annotation.AnnotatorID,
 		"item_key": annotation.ItemKey, "annotation_state": annotation.AnnotationState,
 		"label_count": labels, "source_checksum": annotation.SourceChecksum,
+		"schema_pin_status":  annotation.SchemaPinStatus,
+		"pinned_schema_code": annotation.PinnedSchemaCode, "pinned_schema_version": annotation.PinnedSchemaVersion,
 	}
+}
+
+// BackfillSchemaVersions upgrades historical result sets that predate schema
+// version pinning. It belongs to the operations side: it reads schema center
+// versions but never modifies them. A group is filled only when every result
+// set for an item references one surviving schema version; mixed versions are
+// isolated as unresolved.
+func (service *AnnotationSetService) BackfillSchemaVersions(actor dto.Actor, requestID string) (dto.BackfillReportResponse, error) {
+	groups, err := service.repository.LegacyGroups()
+	if err != nil {
+		return dto.BackfillReportResponse{}, Internal("could not load legacy annotation groups", err)
+	}
+	report := dto.BackfillReportResponse{RanAt: time.Now().UTC(), Details: []dto.BackfillGroupView{}}
+	for _, group := range groups {
+		report.ProcessedGroups++
+		view := dto.BackfillGroupView{DatasetID: group.DatasetID, ItemKey: group.ItemKey, RowCount: group.RowCount}
+		if dataset, datasetErr := service.datasets.Get(group.DatasetID); datasetErr == nil {
+			view.DatasetCode = dataset.DatasetCode
+		}
+		markUnresolved := func(note string) error {
+			if txErr := service.db.Transaction(func(tx *gorm.DB) error {
+				return service.repository.WithDB(tx).BackfillGroup(group.DatasetID, group.ItemKey, map[string]any{
+					"schema_pin_status": constants.SchemaPinUnresolved, "backfill_note": note,
+				})
+			}); txErr != nil {
+				return Internal("could not isolate unresolved annotation group", txErr)
+			}
+			return nil
+		}
+		if group.SchemaCount != 1 || group.SchemaID == 0 {
+			report.UnresolvedItems++
+			view.Outcome, view.Note = "unresolved", "item result sets reference more than one schema version"
+			report.Details = append(report.Details, view)
+			if err := markUnresolved(view.Note); err != nil {
+				return dto.BackfillReportResponse{}, err
+			}
+			continue
+		}
+		schema, schemaErr := service.schemas.Get(group.SchemaID)
+		if schemaErr != nil {
+			report.UnresolvedItems++
+			view.Outcome, view.Note = "unresolved", "referenced schema version no longer exists"
+			report.Details = append(report.Details, view)
+			if err := markUnresolved(view.Note); err != nil {
+				return dto.BackfillReportResponse{}, err
+			}
+			continue
+		}
+		updates := map[string]any{
+			"pinned_schema_code": schema.SchemaCode, "pinned_schema_version": schema.Version,
+			"pinned_source_checksum": gorm.Expr("source_checksum"), "schema_pin_status": constants.SchemaPinPinned,
+			"backfill_note": "backfilled by dataset code and item key",
+		}
+		if txErr := service.db.Transaction(func(tx *gorm.DB) error {
+			return service.repository.WithDB(tx).BackfillGroup(group.DatasetID, group.ItemKey, updates)
+		}); txErr != nil {
+			return dto.BackfillReportResponse{}, Internal("could not backfill annotation pin group", txErr)
+		}
+		report.PinnedGroups++
+		report.PinnedRows += group.RowCount
+		view.Outcome, view.Note = "pinned", schema.SchemaCode
+		report.Details = append(report.Details, view)
+	}
+	if unresolved, listErr := service.repository.LegacyUnresolved(); listErr == nil {
+		report.UnresolvedItems = len(unresolved)
+	}
+	if actor.ID != 0 {
+		_ = service.system.RecordAudit(actor, requestID, "annotation_pin.backfilled", "annotation_set", "backfill",
+			map[string]any{"processed_groups": report.ProcessedGroups, "pinned_groups": report.PinnedGroups,
+				"pinned_rows": report.PinnedRows, "unresolved_items": report.UnresolvedItems}, nil, nil)
+	}
+	return report, nil
+}
+
+// UnresolvedPage exposes the backfill manual-review queue.
+func (service *AnnotationSetService) UnresolvedPage(page, pageSize int) ([]dto.AnnotationSetResponse, dto.PageMeta, error) {
+	items, total, err := service.repository.PinStatusPage(page, pageSize, constants.SchemaPinUnresolved)
+	if err != nil {
+		return nil, dto.PageMeta{}, Internal("could not list unresolved annotation sets", err)
+	}
+	responses := make([]dto.AnnotationSetResponse, 0, len(items))
+	for _, item := range items {
+		responses = append(responses, annotationResponse(item))
+	}
+	return responses, PageMeta(page, pageSize, total), nil
 }

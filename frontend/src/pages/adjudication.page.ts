@@ -14,6 +14,7 @@ import { useAuth } from '../hooks/use-auth';
 import { AnnotationSchemaStore } from '../stores/annotation-schema.store';
 import { AnnotationSetStore } from '../stores/annotation-set.store';
 import { CorpusDatasetStore } from '../stores/corpus-dataset.store';
+import { ReconciliationStore } from '../stores/reconciliation.store';
 import { AdjudicationCase } from '../types/adjudication-case';
 import { AnnotationLabel, AnnotationSet } from '../types/annotation-set';
 
@@ -27,6 +28,21 @@ import { AnnotationLabel, AnnotationSet } from '../types/annotation-set';
     @if (canCompute()) {
       <section class="compute-band"><mat-form-field appearance="outline"><mat-label>Dataset</mat-label><mat-select [(ngModel)]="computeDatasetId">@for (dataset of datasets.items(); track dataset.id) { <mat-option [value]="dataset.id">{{ dataset.dataset_code }}</mat-option> }</mat-select></mat-form-field><mat-form-field appearance="outline"><mat-label>Item key</mat-label><input matInput [(ngModel)]="computeItemKey" /></mat-form-field><mat-form-field appearance="outline"><mat-label>Annotation IDs</mat-label><input matInput [(ngModel)]="computeAnnotationIds" /></mat-form-field><mat-form-field appearance="outline"><mat-label>Metric</mat-label><mat-select [(ngModel)]="computeMetric"><mat-option value="auto">Auto</mat-option><mat-option value="cohen_kappa">Cohen's Kappa</mat-option><mat-option value="krippendorff_alpha">Krippendorff's Alpha</mat-option></mat-select></mat-form-field><button mat-flat-button color="primary" type="button" (click)="compute()" [disabled]="cases.loading()"><lucide-icon name="git-compare-arrows" [size]="16" />Compute</button></section>
     }
+    @if (canCompute()) {
+      <section class="reconcile-band">
+        <header><span>Schema center ↔ operations console reconciliation</span><small>Cases that do not reconcile by dataset code and item key are suspended; deprecated schema versions require re-annotation.</small></header>
+        <div class="reconcile-actions">
+          <button mat-stroked-button type="button" (click)="reconcileNow()" [disabled]="reconciliation.loading()"><lucide-icon name="scale" [size]="15" />Reconcile open cases</button>
+          <button mat-stroked-button type="button" (click)="backfillNow()" [disabled]="reconciliation.loading()"><lucide-icon name="history" [size]="15" />Backfill legacy pins</button>
+          <span class="unresolved-count">Unresolved backlog: {{ reconciliation.unresolved().length }}</span>
+        </div>
+        @if (reconciliation.latest(); as run) {
+          <div class="run-summary">Run #{{ run.id }} · checked {{ run.cases_checked }} · suspended {{ run.cases_suspended }} · resumed {{ run.cases_resumed }} · open mismatches {{ run.open_mismatches }}</div>
+          @for (finding of run.findings; track finding.case_id + finding.action) { <code class="finding">{{ finding.action }} #{{ finding.case_id }} {{ finding.dataset_code }}/{{ finding.item_key }} — {{ finding.reason_code }}</code> }
+        }
+        @if (reconciliation.backfill(); as report) { <div class="run-summary">Backfill · groups {{ report.processed_groups }} · pinned {{ report.pinned_groups }} ({{ report.pinned_rows }} rows) · unresolved {{ report.unresolved_items }}</div> }
+      </section>
+    }
     <section class="case-layout">
       <div class="queue">
         <header><span>Cases</span><small>{{ cases.items().length }} in view</small></header>
@@ -39,6 +55,13 @@ import { AnnotationLabel, AnnotationSet } from '../types/annotation-set';
       <section class="evidence-panel">
         @if (cases.selected(); as item) {
           <header><div><span>Case #{{ item.id }} / {{ item.algorithm_version }}</span><h2>{{ item.dataset_code }} / {{ item.item_key }}</h2></div><app-annotation-state-badge [state]="item.case_state" /></header>
+          @if (item.case_state === 'suspended') {
+            <aside class="suspended-banner">
+              <lucide-icon name="octagon-pause" [size]="17" />
+              <div><strong>Reconciliation hold · {{ item.suspend_reason_code }}</strong><span>{{ item.suspend_reason }}</span><small>Held from {{ item.state_before_suspend }} &#64; {{ item.suspended_at | date:'short' }}</small></div>
+              @if (item.suspend_reason_code !== 'schema_deprecated' && canCompute()) { <button mat-flat-button color="primary" type="button" (click)="resumeCase(item)" [disabled]="reconciliation.loading()">Release hold after repair</button> }
+            </aside>
+          }
           <section class="metric-strip"><article><span>Metric</span><strong>{{ metricName(item.agreement.metric) }}</strong></article><article><span>Score</span><strong>{{ item.agreement.score | number:'1.3-3' }}</strong></article><article><span>Observed</span><strong>{{ item.agreement.observed_agreement | percent:'1.1-1' }}</strong></article><article><span>Chance</span><strong>{{ item.agreement.chance_agreement | percent:'1.1-1' }}</strong></article><article><span>Sample / coders</span><strong>{{ item.agreement.sample_size }} / {{ item.agreement.coder_count }}</strong></article></section>
           <aside class="applicability"><lucide-icon name="file-json-2" [size]="16" /><span><strong>{{ item.disagreement_type }} cluster</strong>{{ item.agreement.applicability }}</span><code>{{ item.cluster_key }}</code></aside>
           <section class="snapshot-grid"><div><span>Compared result sets</span>@for (annotation of selectedAnnotations(); track annotation.id) { <article><header><strong>#{{ annotation.id }} / {{ annotation.annotator }}</strong><app-annotation-state-badge [state]="annotation.annotation_state" /></header>@for (label of annotation.labels; track $index) { <p><span>{{ label.unit_key }}</span><b>{{ label.label }}</b><code>{{ interval(label) }}</code></p> }</article> }</div><app-agreement-matrix [cells]="item.confusion_snapshot" /></section>
@@ -58,6 +81,7 @@ import { AnnotationLabel, AnnotationSet } from '../types/annotation-set';
   `,
   styles: [`
     .compute-band{display:grid;grid-template-columns:.8fr 1fr 1fr .8fr auto;gap:9px;align-items:start;margin-bottom:16px;padding:11px;background:#e7ecea;border:1px solid #c3cdca;border-radius:4px}.compute-band button{height:40px;display:flex;gap:6px}.case-layout{display:grid;grid-template-columns:minmax(350px,.58fr) minmax(620px,1.42fr);gap:16px;align-items:start}.queue,.evidence-panel{background:#fbfcfa;border:1px solid #c1cbc8;border-radius:4px;overflow:hidden}.queue>header{display:flex;justify-content:space-between;padding:11px 13px;background:#e7ecea;border-bottom:1px solid #c8d1ce}.queue header span{font-size:11px;font-weight:750;text-transform:uppercase}.queue header small{font-size:10px}.case-row{width:100%;display:grid;grid-template-columns:32px minmax(0,1fr) 42px auto;align-items:center;gap:9px;padding:11px;background:#fbfcfa;border:0;border-bottom:1px solid #dce2e0;text-align:left;cursor:pointer}.case-row:hover,.case-row.selected{background:#fff4cf}.case-id{font-size:10px;font-weight:800}.case-row>span:nth-child(2){display:grid;gap:3px;min-width:0}.case-row>span strong{font-size:11px}.case-row small{overflow:hidden;color:#6a777b;font-size:9px;text-overflow:ellipsis;white-space:nowrap}.score{height:31px;display:grid;place-items:center;color:#f3f6f4;background:#435157;border-radius:3px;font-size:10px}.evidence-panel>header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:14px 15px;border-bottom:1px solid #cad2cf}.evidence-panel header span{color:#69767a;font-size:9px;text-transform:uppercase}.evidence-panel h2{margin:3px 0 0;font-size:17px}.metric-strip{display:grid;grid-template-columns:1.25fr repeat(4,1fr);background:#e8edeb;border-bottom:1px solid #cbd3d0}.metric-strip article{min-width:0;padding:10px 12px;border-right:1px solid #c5cecb}.metric-strip article:last-child{border-right:0}.metric-strip span{display:block;color:#69767a;font-size:9px;text-transform:uppercase}.metric-strip strong{display:block;overflow:hidden;margin-top:4px;font-size:14px;text-overflow:ellipsis;white-space:nowrap}.applicability{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:9px;margin:14px;padding:10px;background:#edf2ef;border-left:3px solid #458063}.applicability>span{display:grid;gap:2px;font-size:10px;line-height:1.4}.applicability strong{font-size:9px;text-transform:uppercase}.applicability code{max-width:240px;overflow:hidden;font-size:9px;text-overflow:ellipsis}.snapshot-grid{display:grid;grid-template-columns:minmax(280px,.8fr) minmax(320px,1.2fr);gap:14px;margin:14px}.snapshot-grid>div>span{display:block;margin-bottom:7px;color:#69767a;font-size:9px;text-transform:uppercase}.snapshot-grid>div>article{margin-bottom:8px;border:1px solid #d3dbd8}.snapshot-grid article>header{display:flex;align-items:center;justify-content:space-between;gap:7px;padding:7px 8px;background:#edf1ef}.snapshot-grid article>header strong{font-size:10px}.snapshot-grid article p{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;margin:0;padding:6px 8px;border-top:1px solid #e0e5e3;font-size:9px}.snapshot-grid article p b{color:#70510d}.snapshot-grid article code{font-size:9px}.evidence-panel>app-diff-evidence-drawer{display:block;margin:14px}.decision-panel{margin:14px;border-top:1px solid #d3dad8}.decision-panel>header{display:flex;justify-content:space-between;gap:8px;padding:11px 0}.decision-panel>header span{font-size:10px;font-weight:750;text-transform:uppercase}.decision-panel>header small{color:#6a777a;font-size:9px}.action-line{display:flex;align-items:start;gap:8px;padding:10px;background:#eef2f0}.action-line mat-form-field{flex:1}.action-line button{height:40px}.decision-form{display:grid;gap:4px;padding:11px;background:#eef2f0}.decision-tools{display:flex;align-items:center;justify-content:space-between;gap:9px;margin-bottom:7px}.decision-tools span{color:#647176;font-size:9px}.decision-form>button{justify-self:end;display:flex;gap:6px}
+    .reconcile-band{margin-bottom:16px;padding:12px;background:#f3f6f4;border:1px solid #c3cdca;border-left:4px solid #458063;border-radius:4px}.reconcile-band header{display:grid;gap:3px;margin-bottom:9px}.reconcile-band header span{font-size:11px;font-weight:750;text-transform:uppercase}.reconcile-band header small{font-size:9px;color:#647176}.reconcile-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.reconcile-actions button{display:flex;gap:6px}.unresolved-count{font-size:10px;font-weight:700;color:#842f2a}.run-summary{margin-top:9px;font-size:10px;font-weight:650;color:#34624d}.finding{display:block;margin-top:4px;padding:3px 6px;background:#e7ecea;border-radius:3px;font-size:9px;color:#566267;word-break:break-all}.suspended-banner{display:flex;align-items:flex-start;gap:11px;margin:14px;padding:12px;background:#f9ecea;border:1px solid #dba49e;border-left:4px solid #842f2a;border-radius:3px}.suspended-banner svg{color:#842f2a;flex:none}.suspended-banner div{display:grid;gap:3px;flex:1}.suspended-banner strong{font-size:11px;color:#842f2a}.suspended-banner span{font-size:10px;color:#6b4a47}.suspended-banner small{font-size:9px;color:#8a6d6a}.suspended-banner button{align-self:center}
     @media(max-width:1180px){.case-layout{grid-template-columns:1fr}.compute-band{grid-template-columns:repeat(2,1fr)}.compute-band button{grid-column:2}}@media(max-width:760px){.compute-band,.snapshot-grid,.metric-strip{grid-template-columns:1fr}.compute-band button{grid-column:1}.case-row{grid-template-columns:30px minmax(0,1fr) 40px}.case-row app-annotation-state-badge{grid-column:2}.metric-strip article{border-right:0;border-bottom:1px solid #c5cecb}.applicability{grid-template-columns:auto minmax(0,1fr)}.applicability code{grid-column:2;max-width:100%}.action-line,.decision-tools{align-items:stretch;flex-direction:column}.decision-panel>header{display:grid}.case-layout{display:block}.evidence-panel{margin-top:12px}}
   `],
 })
@@ -67,6 +91,7 @@ export class AdjudicationPage implements OnInit {
   readonly annotations = inject(AnnotationSetStore);
   readonly cases = useAdjudicationQueue();
   readonly auth = useAuth();
+  readonly reconciliation = inject(ReconciliationStore);
   readonly localError = signal('');
   readonly selectedAnnotations = computed<AnnotationSet[]>(() => {
     const ids = this.cases.selected()?.annotation_set_ids ?? [];
@@ -90,7 +115,12 @@ export class AdjudicationPage implements OnInit {
   canReview = (item: AdjudicationCase): boolean => this.canAdjudicate() && item.adjudicator_id !== this.auth.user()?.id && this.canClaim();
   canConclude = (item: AdjudicationCase): boolean => this.canAdjudicate() && item.reviewed_by === this.auth.user()?.id;
   ngOnInit(): void { this.reload(); }
-  reload(): void { this.datasets.load(); this.schemas.load(); this.annotations.load(); this.cases.load(); }
+  reload(): void { this.datasets.load(); this.schemas.load(); this.annotations.load(); this.cases.load(); this.reconciliation.load(); }
+  reconcileNow(): void { this.reconciliation.run(undefined, undefined, () => this.cases.load()); }
+  backfillNow(): void { this.reconciliation.runBackfill(() => this.reconciliation.load()); }
+  resumeCase(item: AdjudicationCase): void {
+    this.reconciliation.resume(item.id, 'Reconciliation mismatch repaired; returning the held case to its prior state.', () => this.cases.load());
+  }
   choose(item: AdjudicationCase): void { this.cases.choose(item); this.localError.set(''); this.useLeftLabels(); }
   compute(): void {
     const ids = this.computeAnnotationIds.split(',').map((value) => Number(value.trim())).filter((value) => Number.isInteger(value) && value > 0);

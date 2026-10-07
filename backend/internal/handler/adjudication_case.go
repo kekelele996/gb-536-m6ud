@@ -10,11 +10,13 @@ import (
 )
 
 type AdjudicationCaseHandler struct {
-	service *service.AdjudicationCaseService
+	service        *service.AdjudicationCaseService
+	reconciliation *service.ReconciliationService
+	system         *service.SystemService
 }
 
-func NewAdjudicationCaseHandler(service *service.AdjudicationCaseService) *AdjudicationCaseHandler {
-	return &AdjudicationCaseHandler{service: service}
+func NewAdjudicationCaseHandler(service *service.AdjudicationCaseService, reconciliation *service.ReconciliationService, system *service.SystemService) *AdjudicationCaseHandler {
+	return &AdjudicationCaseHandler{service: service, reconciliation: reconciliation, system: system}
 }
 
 func (handler *AdjudicationCaseHandler) List(context *gin.Context) {
@@ -124,6 +126,49 @@ func (handler *AdjudicationCaseHandler) reviewAction(context *gin.Context, actio
 		return
 	}
 	item, err := action(id, request, Actor(context), RequestID(context))
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WriteData(context, http.StatusOK, item)
+}
+
+func (handler *AdjudicationCaseHandler) Reconcile(context *gin.Context) {
+	var request dto.ReconcileRequest
+	if err := BindAndValidate(context, &request); err != nil {
+		WriteError(context, err)
+		return
+	}
+	run, err := handler.reconciliation.Run(request, Actor(context), RequestID(context))
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WriteData(context, http.StatusOK, run)
+}
+
+func (handler *AdjudicationCaseHandler) ReconciliationRuns(context *gin.Context) {
+	page, pageSize := Pagination(context)
+	items, meta, err := handler.system.ReconciliationRuns(page, pageSize)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	WritePage(context, items, meta)
+}
+
+func (handler *AdjudicationCaseHandler) ResumeSuspended(context *gin.Context) {
+	id, err := PathID(context)
+	if err != nil {
+		WriteError(context, err)
+		return
+	}
+	var request dto.ResumeCaseRequest
+	if err := BindAndValidate(context, &request); err != nil {
+		WriteError(context, err)
+		return
+	}
+	item, err := handler.reconciliation.Resume(id, request, Actor(context), RequestID(context))
 	if err != nil {
 		WriteError(context, err)
 		return

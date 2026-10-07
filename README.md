@@ -13,11 +13,14 @@ docker compose up -d --build
 ## 主要功能
 
 - 创建、修订、冻结和归档 `CorpusDataset` 版本。
-- 草拟、校验、发布、废止和复制 `AnnotationSchema` 版本。
-- 创建、编辑、提交、退回、锁定、比较和替代本人拥有的 `AnnotationSet`。
+- 草拟、校验、发布、废止和复制 `AnnotationSchema` 版本；规范中心只负责规范本身的发布与废止。
+- 创建、编辑、提交、退回、锁定、比较和替代本人拥有的 `AnnotationSet`；提交时钉住生效规范版本（`schema_code` + `version`）与源校验和。
+- 规范版本废止后，历史结果集原样保留但不能再算分，需在现行规范下重标（走 `supersede` 链）后重新计算。
 - 计算 Cohen's Kappa 或名义尺度 Krippendorff's Alpha，同时展示观测一致率、机会一致率、样本量、标注员数量、缺失值数量和适用条件。
 - 对 span 标注识别边界、标签、遗漏和重叠分歧，保存标签混淆矩阵和稳定聚类键。
 - 认领、裁决、独立复核、接受或重开 `AdjudicationCase`，并对计算和裁决提交提供幂等保护。
+- 按数据集编号（`dataset_code`）与条目键（`item_key`）对账；对不上的未结裁决单进入 `suspended` 挂起态，修复后可恢复，废止规范挂起单只能重标。
+- 升级时按条目键回填旧结果集的规范版本；同一条目存在多个版本或版本已缺失的结果单列 `unresolved` 队列。
 - 按操作者、request ID、实体和动作检索四实体的脱敏审计投影。
 
 ## 角色账号
@@ -108,6 +111,11 @@ docker compose up -d --build
 | `POST /api/v1/adjudications/:id/review` | 独立复核 | adjudicator/admin |
 | `POST /api/v1/adjudications/:id/accept` | 接受已复核裁决 | 仅记录在案的独立 reviewer |
 | `POST /api/v1/adjudications/:id/reopen` | 重开已复核裁决 | 仅记录在案的独立 reviewer |
+| `POST /api/v1/reconciliation/run` | 按数据集编号和条目键对账并挂起/恢复案件 | manager/admin |
+| `GET /api/v1/reconciliation/runs` | 查询对账运行记录 | manager/admin |
+| `POST /api/v1/adjudications/:id/resume` | 修复后释放挂起案件（废止规范除外） | manager/admin |
+| `POST /api/v1/annotations/backfill` | 手动触发旧数据规范版本回填 | manager/admin |
+| `GET /api/v1/annotations/unresolved` | 回填补不出的未决结果队列 | manager/admin |
 | `GET /api/v1/audit` | 筛选脱敏变更投影 | auditor/adjudicator/admin |
 
 一致性计算和裁决提交必须带 `Idempotency-Key` 请求头。非法状态迁移返回 HTTP 409，规范或标注不兼容返回 HTTP 422，未认证和权限不足分别返回 401、403。
@@ -131,6 +139,8 @@ docker compose up -d --build
 
 `DisagreementType = boundary | label | omission | overlap`
 
+`CaseState` 另含对账挂起态 `suspended`（不计入正常状态机迁移，由对账服务挂起/恢复并记录 `state_before_suspend`）；结果集钉版状态 `SchemaPinStatus = legacy | pinned | unresolved`。
+
 | 层级 | 位置 |
 | --- | --- |
 | 后端枚举 | `backend/internal/constants/disagreement_type.go` |
@@ -144,6 +154,17 @@ docker compose up -d --build
 | 测试 | `backend/internal/matching/span_test.go` |
 
 数据集页和裁决页共用 `AgreementMatrix`；标注页和裁决页共用 `AnnotationStateBadge`；标注、裁决和审计页共用 `DiffEvidenceDrawer`。`useAuth` 与 `useAdjudicationQueue` 位于 `frontend/src/hooks/`。
+
+## 规范版本钉版与两侧对账
+
+规范中心（`AnnotationSchema` 维护端）与标注运营台（`AnnotationSet` / `AdjudicationCase` 侧）职责分离：
+
+- **提交钉版**：结果集 `draft -> submitted` 时在运营台侧快照 `pinned_schema_code`、`pinned_schema_version`、`pinned_source_checksum` 与 `pinned_at`；提交可携带 `source_checksum`，与建档校验和不一致返回 409 `source_checksum_mismatch`。
+- **发布/废止隔离**：规范发布与废止只写规范表及对应审计；发布失败只需重试规范侧，运营台已提交结果不受影响。
+- **废止处理**：规范废止后，禁止基于该版创建结果（422 `incompatible_schema`）与重新算分（422 `schema_deprecated`）。历史结果不删除，标注员在现行规范下新建结果并经 `supersedes` 链替代旧版，再锁分计算。
+- **对账挂起**：`POST /api/v1/reconciliation/run` 按数据集编号和条目键核对裁决单与结果集；未钉版、键不一致或结果集缺失的未结案件进入 `suspended`（记录 `suspend_reason_code` 与 `state_before_suspend`），修复后同次或下次对账自动恢复，也可由经理 `POST /api/v1/adjudications/:id/resume` 手动恢复。废止规范挂起单拒绝恢复，必须重标。
+- **升级回填**：服务启动时对 `schema_pin_status=legacy` 且已提交的旧数据，按 `dataset_id + item_key` 分组回填；同条目引用唯一规范版本即钉版，多版本或版本缺失标为 `unresolved` 单列。也可手动触发 `POST /api/v1/annotations/backfill`，未决队列见 `GET /api/v1/annotations/unresolved`。
+- **裁决状态**：`suspended` 不参与认领/裁决/复核状态机；已接受案件是历史记录，不重新挂起。
 
 ## 算法适用条件
 
@@ -248,7 +269,9 @@ docker compose logs --tail=100 backend frontend db
 - **登录返回 401：** 使用上表中的完整账号密码，并确认后端健康。
 - **写操作返回 403：** 当前 JWT 角色或资源所有权不允许该动作。数据集/规范属于 `data_manager`，结果创建属于 `annotator`，裁决属于 `adjudicator`。
 - **状态迁移返回 409：** 刷新记录并按状态机顺序操作；数据集更新还必须携带当前版本。
-- **标注返回 422：** 检查数据集已冻结、规范已发布且属于该数据集、标签存在于规范中，并确保 span 的 `end > start`。
+- **标注返回 422：** 检查数据集已冻结、规范已发布且属于该数据集、标签存在于规范中，并确保 span 的 `end > start`。规范已废止时需改用现行规范重标；未钉版或钉版与规范中心不一致的结果集不能算分。
+- **提交返回 409 `source_checksum_mismatch`：** 提交携带的 `source_checksum` 必须与建档时一致；提交成功即钉住该校验和与规范版本。
+- **裁决单显示 `suspended`：** 对账发现数据集编号/条目键对不上、结果集缺失或规范版本未钉版；修复后重新运行对账即可恢复。`schema_deprecated` 挂起单不能手动恢复，必须按现行规范重标并重算。
 - **裁决复核返回 403：** 做出裁决的人不能复核同一案件，请改用 `reviewer`。
 - **Compose 端口冲突：** 只修改 `.env` 中宿主机侧的 `FRONTEND_PORT`、`BACKEND_PORT` 或 `DB_PORT`。
 

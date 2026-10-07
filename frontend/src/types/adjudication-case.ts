@@ -54,10 +54,56 @@ export interface AdjudicationCase {
   idempotency_key: string;
   decision_idempotency_key?: string;
   reopen_count: number;
+  suspend_reason_code: string;
+  suspend_reason: string;
+  state_before_suspend: string;
+  suspended_at?: string;
   created_by: number;
   created_at: string;
   updated_at: string;
   reused: boolean;
+}
+
+export interface ReconciliationFinding {
+  case_id: number;
+  dataset_id: number;
+  dataset_code: string;
+  item_key: string;
+  action: 'suspended' | 'still_suspended' | 'holds_deprecated_schema' | 'resumed';
+  reason_code: string;
+  reason: string;
+  previous_state?: string;
+}
+
+export interface ReconciliationRun {
+  id: number;
+  scope: 'all' | 'dataset' | 'item';
+  dataset_id: number;
+  item_key: string;
+  cases_checked: number;
+  cases_suspended: number;
+  cases_resumed: number;
+  open_mismatches: number;
+  findings: ReconciliationFinding[];
+  triggered_by: number;
+  completed_at: string;
+  created_at: string;
+}
+
+export interface BackfillReport {
+  processed_groups: number;
+  pinned_groups: number;
+  pinned_rows: number;
+  unresolved_items: number;
+  details: Array<{
+    dataset_id: number;
+    dataset_code: string;
+    item_key: string;
+    row_count: number;
+    outcome: 'pinned' | 'unresolved';
+    note: string;
+  }>;
+  ran_at: string;
 }
 
 export interface ComputeAdjudication {

@@ -21,4 +21,12 @@ func registerAdjudicationCaseRoutes(group *gin.RouterGroup, target *handler.Adju
 	decisions.POST("/:id/review", target.Review)
 	decisions.POST("/:id/accept", target.Accept)
 	decisions.POST("/:id/reopen", target.Reopen)
+
+	// Operations-console reconciliation; it suspends/resumes cases but never
+	// publishes or deprecates schemas, which remain schema-center territory.
+	manager := group.Group("")
+	manager.Use(middleware.RBAC(constants.RoleDataManager, constants.RoleAdmin))
+	manager.POST("/reconciliation/run", target.Reconcile)
+	manager.GET("/reconciliation/runs", target.ReconciliationRuns)
+	manager.POST("/adjudications/:id/resume", target.ResumeSuspended)
 }

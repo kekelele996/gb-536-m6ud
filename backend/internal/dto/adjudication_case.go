@@ -74,8 +74,47 @@ type AdjudicationCaseResponse struct {
 	IdempotencyKey         string            `json:"idempotency_key"`
 	DecisionIdempotencyKey *string           `json:"decision_idempotency_key"`
 	ReopenCount            int               `json:"reopen_count"`
+	SuspendReasonCode      string            `json:"suspend_reason_code"`
+	SuspendReason          string            `json:"suspend_reason"`
+	StateBeforeSuspend     string            `json:"state_before_suspend"`
+	SuspendedAt            *time.Time        `json:"suspended_at"`
 	CreatedBy              uint              `json:"created_by"`
 	CreatedAt              time.Time         `json:"created_at"`
 	UpdatedAt              time.Time         `json:"updated_at"`
 	Reused                 bool              `json:"reused"`
+}
+
+type ReconcileRequest struct {
+	DatasetID uint   `json:"dataset_id"`
+	ItemKey   string `json:"item_key" validate:"omitempty,min=2,max=120"`
+}
+
+type ResumeCaseRequest struct {
+	Note string `json:"note" validate:"required,min=8,max=500"`
+}
+
+type ReconciliationFinding struct {
+	CaseID        uint   `json:"case_id"`
+	DatasetID     uint   `json:"dataset_id"`
+	DatasetCode   string `json:"dataset_code"`
+	ItemKey       string `json:"item_key"`
+	Action        string `json:"action"`
+	ReasonCode    string `json:"reason_code"`
+	Reason        string `json:"reason"`
+	PreviousState string `json:"previous_state,omitempty"`
+}
+
+type ReconciliationRunResponse struct {
+	ID             uint                    `json:"id"`
+	Scope          string                  `json:"scope"`
+	DatasetID      uint                    `json:"dataset_id"`
+	ItemKey        string                  `json:"item_key"`
+	CasesChecked   int                     `json:"cases_checked"`
+	CasesSuspended int                     `json:"cases_suspended"`
+	CasesResumed   int                     `json:"cases_resumed"`
+	OpenMismatches int                     `json:"open_mismatches"`
+	Findings       []ReconciliationFinding `json:"findings"`
+	TriggeredBy    uint                    `json:"triggered_by"`
+	CompletedAt    time.Time               `json:"completed_at"`
+	CreatedAt      time.Time               `json:"created_at"`
 }

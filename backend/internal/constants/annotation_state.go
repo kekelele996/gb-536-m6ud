@@ -29,6 +29,11 @@ const (
 	CaseReviewed    = "reviewed"
 	CaseAccepted    = "accepted"
 	CaseReopened    = "reopened"
+	CaseSuspended   = "suspended"
+
+	SchemaPinLegacy     = "legacy"
+	SchemaPinPinned     = "pinned"
+	SchemaPinUnresolved = "unresolved"
 )
 
 func ValidRole(value string) bool {
@@ -80,4 +85,36 @@ func CanTransitionCase(from, to string) bool {
 		CaseReviewed:    {CaseAccepted: true, CaseReopened: true},
 	}
 	return allowed[from][to]
+}
+
+func ValidSchemaPinStatus(value string) bool {
+	switch value {
+	case SchemaPinLegacy, SchemaPinPinned, SchemaPinUnresolved:
+		return true
+	default:
+		return false
+	}
+}
+
+// CaseIsOpen reports whether a case is still awaiting adjudication, as opposed
+// to a concluded (accepted) case or a reconciliation-suspended case.
+func CaseIsOpen(value string) bool {
+	switch value {
+	case CaseOpen, CaseAssigned, CaseAdjudicated, CaseReviewed, CaseReopened:
+		return true
+	default:
+		return false
+	}
+}
+
+// CanResumeSuspendedCase allows reconciliation to return a suspended case to
+// the exact state it occupied before the hold, provided that state is still
+// actionable.
+func CanResumeSuspendedCase(previous string) bool {
+	switch previous {
+	case CaseOpen, CaseAssigned, CaseAdjudicated, CaseReviewed, CaseReopened:
+		return true
+	default:
+		return false
+	}
 }

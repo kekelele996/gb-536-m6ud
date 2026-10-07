@@ -153,7 +153,7 @@ func testServiceDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&model.CorpusDataset{}, &model.AdjudicationCase{}, &model.AuditEvent{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.CorpusDataset{}, &model.AnnotationSchema{}, &model.AnnotationSet{}, &model.AdjudicationCase{}, &model.AuditEvent{}); err != nil {
 		t.Fatalf("migrate test database: %v", err)
 	}
 	return db

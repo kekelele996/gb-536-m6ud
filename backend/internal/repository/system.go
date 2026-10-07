@@ -47,6 +47,22 @@ func (repository *SystemRepository) CreateAudit(event *model.AuditEvent) error {
 	return nil
 }
 
+// ReconciliationRuns lists the audit projections emitted by reconciliation
+// passes, so run history reuses the audit stream instead of a new table.
+func (repository *SystemRepository) ReconciliationRuns(page, pageSize int) ([]model.AuditEvent, int64, error) {
+	query := repository.db.Model(&model.AuditEvent{}).
+		Where("action = ? AND resource_type = ?", "reconciliation.run", "adjudication_case")
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count reconciliation runs: %w", err)
+	}
+	var events []model.AuditEvent
+	if err := query.Order("id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&events).Error; err != nil {
+		return nil, 0, fmt.Errorf("list reconciliation runs: %w", err)
+	}
+	return events, total, nil
+}
+
 func (repository *SystemRepository) ListAudit(page, pageSize int, actor, requestID, resourceType, action string, from, to *time.Time) ([]model.AuditEvent, int64, error) {
 	query := repository.db.Model(&model.AuditEvent{})
 	if actor != "" {

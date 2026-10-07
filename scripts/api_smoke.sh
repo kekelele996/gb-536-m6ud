@@ -146,6 +146,58 @@ request "compute self-isolation case" 201 POST "/adjudications" "$manager_token"
 self_case_id="$(jq -r '.data.id' <<<"$last_body")"
 request "adjudicator cannot claim own annotation" 403 POST "/adjudications/$self_case_id/assign" "$admin_token" '{"note":"Self-adjudication must be denied."}'
 
+request "submitted result pins effective schema version" 200 GET "/annotations/$left_id" "$auditor_token"
+require_json '.data.schema_pin_status == "pinned" and .data.pinned_schema_code != "" and .data.pinned_schema_version >= 1 and .data.pinned_source_checksum == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "pinned schema version and source checksum"
+
+checksum_item="QA-CHK-${run_suffix}"
+checksum_payload="$(jq -nc --argjson dataset "$dataset_id" --argjson schema "$schema_id" --arg item "$checksum_item" --argjson labels "$left_labels" '{dataset_id:$dataset,schema_id:$schema,item_key:$item,labels:$labels,source_checksum:"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",quality_note:"Checksum verification set."}')"
+request "annotator A creates checksum set" 201 POST "/annotations" "$annotator_a_token" "$checksum_payload"; checksum_annotation_id="$(jq -r '.data.id' <<<"$last_body")"
+request "submit with mismatched source checksum rejected" 409 POST "/annotations/$checksum_annotation_id/transition" "$annotator_a_token" '{"target_state":"submitted","source_checksum":"0000000000000000000000000000000000000000000000000000000000000000"}'
+require_json '.error.code == "source_checksum_mismatch"' "source checksum mismatch code"
+request "submit with matching source checksum" 200 POST "/annotations/$checksum_annotation_id/transition" "$annotator_a_token" '{"target_state":"submitted","source_checksum":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}'
+require_json '.data.schema_pin_status == "pinned" and .data.pinned_source_checksum == "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"' "checksum set pinned on submit"
+
+request "copy new schema version" 201 POST "/schemas/$schema_id/copy" "$manager_token" '{"version":91}'
+new_schema_id="$(jq -r '.data.id' <<<"$last_body")"
+require_json '.data.version == 91 and .data.schema_state == "draft"' "copied schema draft"
+request "validate copied schema" 200 POST "/schemas/$new_schema_id/transition" "$manager_token" '{"target_state":"validated"}'
+request "publish copied schema" 200 POST "/schemas/$new_schema_id/transition" "$manager_token" '{"target_state":"published"}'
+request "annotator cannot deprecate schema" 403 POST "/schemas/$schema_id/transition" "$annotator_a_token" '{"target_state":"deprecated"}'
+request "deprecate original schema version" 200 POST "/schemas/$schema_id/transition" "$manager_token" '{"target_state":"deprecated"}'
+stale_payload="$(jq -nc --argjson dataset "$dataset_id" --argjson schema "$schema_id" --arg item "QA-STALE-${run_suffix}" --argjson labels "$left_labels" '{dataset_id:$dataset,schema_id:$schema,item_key:$item,labels:$labels,source_checksum:"3333333333333333333333333333333333333333333333333333333333333333",quality_note:"Must be rejected after deprecation."}')"
+request "new draft against deprecated schema rejected" 422 POST "/annotations" "$annotator_a_token" "$stale_payload"
+require_json '.error.code == "incompatible_schema"' "deprecated schema creation code"
+request "deprecated results retained not deleted" 200 GET "/annotations/$left_id" "$auditor_token"
+require_json '.data.schema_pin_status == "pinned" and .data.pinned_schema_version == 1' "pinned historical result survives deprecation"
+
+relabel_item="QA-RELABEL-${run_suffix}"
+relabel_left="$(jq -nc --argjson dataset "$dataset_id" --argjson schema "$new_schema_id" --arg item "$relabel_item" --argjson labels "$left_labels" '{dataset_id:$dataset,schema_id:$schema,item_key:$item,labels:$labels,source_checksum:"1111111111111111111111111111111111111111111111111111111111111111",quality_note:"Re-annotated against the current schema."}')"
+relabel_right="$(jq -nc --argjson dataset "$dataset_id" --argjson schema "$new_schema_id" --arg item "$relabel_item" --argjson labels "$right_labels" '{dataset_id:$dataset,schema_id:$schema,item_key:$item,labels:$labels,source_checksum:"2222222222222222222222222222222222222222222222222222222222222222",quality_note:"Independent re-annotation against the current schema."}')"
+request "re-annotation left set" 201 POST "/annotations" "$annotator_a_token" "$relabel_left"; relabel_left_id="$(jq -r '.data.id' <<<"$last_body")"
+request "re-annotation right set" 201 POST "/annotations" "$annotator_b_token" "$relabel_right"; relabel_right_id="$(jq -r '.data.id' <<<"$last_body")"
+request "submit re-annotation left" 200 POST "/annotations/$relabel_left_id/transition" "$annotator_a_token" '{"target_state":"submitted","source_checksum":"1111111111111111111111111111111111111111111111111111111111111111"}'
+request "submit re-annotation right" 200 POST "/annotations/$relabel_right_id/transition" "$annotator_b_token" '{"target_state":"submitted","source_checksum":"2222222222222222222222222222222222222222222222222222222222222222"}'
+request "lock re-annotation left" 200 POST "/annotations/$relabel_left_id/transition" "$manager_token" '{"target_state":"locked"}'
+request "lock re-annotation right" 200 POST "/annotations/$relabel_right_id/transition" "$manager_token" '{"target_state":"locked"}'
+relabel_compute="$(jq -nc --argjson dataset "$dataset_id" --arg item "$relabel_item" --argjson left "$relabel_left_id" --argjson right "$relabel_right_id" '{dataset_id:$dataset,item_key:$item,annotation_set_ids:[$left,$right],metric:"auto"}')"
+request "re-annotated item scored on current schema" 201 POST "/adjudications" "$manager_token" "$relabel_compute" "qa-relabel-${run_suffix}"
+require_json '.data.agreement.metric == "cohen_kappa"' "re-annotation score"
+
+request "auditor cannot trigger reconciliation" 403 POST "/reconciliation/run" "$auditor_token" '{"dataset_id":0,"item_key":""}'
+request "manager reconciles open cases" 200 POST "/reconciliation/run" "$manager_token" '{"dataset_id":0,"item_key":""}'
+require_json '.data.cases_suspended >= 1 and any(.data.findings[]; .reason_code == "schema_deprecated" and .action == "suspended")' "deprecated-schema cases suspended"
+request "deprecated case detail shows hold" 200 GET "/adjudications/$self_case_id" "$manager_token"
+require_json '.data.case_state == "suspended" and .data.suspend_reason_code == "schema_deprecated" and .data.state_before_suspend == "open"' "suspended case snapshot"
+request "suspended case cannot be claimed" 409 POST "/adjudications/$self_case_id/assign" "$adjudicator_token" '{"note":"Claim while suspended must fail."}'
+require_json '.error.code == "case_suspended"' "suspended claim error code"
+request "deprecated hold cannot be released" 422 POST "/adjudications/$self_case_id/resume" "$manager_token" '{"note":"Attempt to release a deprecated-schema hold anyway."}'
+require_json '.error.code == "schema_deprecated"' "deprecated resume error code"
+request "list reconciliation runs" 200 GET "/reconciliation/runs?page_size=20" "$manager_token"
+require_json '(.data | length) >= 1' "reconciliation run history"
+request "backfill legacy pin versions" 200 POST "/annotations/backfill" "$manager_token" '{}'
+require_json '.data.processed_groups >= 0 and .data.unresolved_items >= 0' "backfill report"
+request "list unresolved backlog" 200 GET "/annotations/unresolved?page_size=50" "$manager_token"
+
 request "auditor reads redacted audit stream" 200 GET "/audit?page_size=200" "$auditor_token"
 require_json '([.data[].resource_type] | unique | length) >= 4 and ([.data[].action] | index("adjudication_case.accepted")) != null' "four entity projections and accepted action"
 require_json 'all(.data[]; (((.parameters|tostring) + (.before|tostring) + (.after|tostring)) | contains("document_class")) | not)' "audit stream excludes full label payloads"
